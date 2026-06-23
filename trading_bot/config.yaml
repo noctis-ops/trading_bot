@@ -1,0 +1,233 @@
+# ═══════════════════════════════════════════════════════════
+# Trading Bot Configuration File
+# ═══════════════════════════════════════════════════════════
+
+# البيئة: 'testnet' أو 'live'
+environment: 'testnet'
+
+# ─────────────────────────────────────────────────────────
+# إعدادات التبادل (Exchange Settings)
+# ─────────────────────────────────────────────────────────
+exchange:
+  name: 'binance'
+  sandbox: true  # true للـ Testnet، false للحقيقي
+  enable_rate_limit: true
+  timeout: 30000  # ميلي ثانية
+  retry_attempts: 3
+  retry_delay: 1000  # ميلي ثانية
+
+# ─────────────────────────────────────────────────────────
+# أزواج التداول (Trading Pairs)
+# ─────────────────────────────────────────────────────────
+trading:
+  symbols:
+    - 'ETH/USDT'
+    - 'BNB/USDT'
+    - 'XRP/USDT'
+    - 'DOGE/USDT'
+    - 'ADA/USDT'
+  
+  # الإطار الزمني الرئيسي للإشارات
+  main_timeframe: '15m'
+  
+  # الإطار الزمني للاتجاه الكبير
+  trend_timeframe: '1h'
+  
+  # الإطار الزمني للتأكيد
+  confirmation_timeframe: '5m'
+  
+  # عدد الشموع اللازمة لحساب المؤشرات
+  lookback_period: 300  # شمعة
+  
+  # عدد الصفقات المفتوحة في نفس الوقت
+  max_concurrent_positions: 1
+  
+  # فترة الفحص (بالثواني)
+  check_interval_seconds: 60
+
+# ─────────────────────────────────────────────────────────
+# إدارة المخاطر (Risk Management)
+# ─────────────────────────────────────────────────────────
+risk_management:
+  # نسبة المخاطرة من الرصيد في كل صفقة
+  risk_percent_per_trade: 2.0  # %
+  
+  # أقصى خسارة يومية قبل الإيقاف
+  max_daily_loss_percent: 6.0  # %
+  
+  # عدد الخسائر المتتالية قبل الإيقاف المؤقت
+  max_consecutive_losses: 3
+  
+  # وقت الإيقاف المؤقت بعد الخسائر (بالدقائق)
+  cooldown_minutes: 60
+  
+  # أقصى رافعة مالية
+  max_leverage: 10
+  
+  # الحد الأدنى لنسبة Risk:Reward
+  min_risk_reward_ratio: 2.0
+  
+  # هل نحرك الـ Stop Loss إلى Breakeven بعد TP1؟
+  move_sl_to_breakeven_after_tp1: true
+  
+  # إغلاق الصفقات الخاسرة تلقائياً إذا اقتربت من SL
+  close_losing_early: false
+  close_losing_percent: 5.0  # % from SL
+
+# ─────────────────────────────────────────────────────────
+# إعدادات الاستراتيجية (Strategy Settings)
+# ─────────────────────────────────────────────────────────
+strategy:
+  
+  # المؤشرات - متوسطات الحركة (Moving Averages)
+  indicators:
+    ema_fast: 50      # EMA سريع
+    ema_slow: 200     # EMA بطيء
+    ema_medium: 21    # EMA متوسط
+  
+  # مؤشر الزخم (Momentum)
+  momentum:
+    rsi_period: 14
+    rsi_long_entry_min: 50    # أقل قيمة لـ RSI للدخول طويل
+    rsi_long_entry_max: 70    # أعلى قيمة لـ RSI للدخول طويل
+    rsi_short_entry_min: 30   # أقل قيمة لـ RSI للدخول قصير
+    rsi_short_entry_max: 50   # أعلى قيمة لـ RSI للدخول قصير
+    
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+  
+  # مؤشر الاتجاه (Trend Strength)
+  trend:
+    adx_period: 14
+    adx_threshold: 25  # إذا كان ADX أقل = السوق sideways
+  
+  # مؤشر التقلب (Volatility)
+  volatility:
+    atr_period: 14
+    atr_stop_loss_multiplier: 1.5   # ATR × 1.5 = مسافة SL
+    atr_tp1_multiplier: 2.0         # ATR × 2.0 = هدف الربح الأول
+    atr_tp2_multiplier: 3.5         # ATR × 3.5 = هدف الربح الثاني
+    
+    # Bollinger Bands (للكشف عن Squeeze)
+    bb_period: 20
+    bb_std_dev: 2.0
+  
+  # حجم التداول (Volume)
+  volume:
+    volume_ma_period: 20
+    volume_multiplier: 1.5  # الحجم الحالي يجب أن يكون 1.5x المتوسط
+
+  # شروط إضافية
+  require_higher_high: false  # التأكد من higher high قبل الدخول الطويل
+  require_higher_low: false   # التأكد من higher low قبل الدخول الطويل
+
+# ─────────────────────────────────────────────────────────
+# إعدادات التليجرام (Telegram Settings)
+# ─────────────────────────────────────────────────────────
+telegram:
+  # أوقات الرسائل (بصيغة HH:MM - UTC)
+  daily_report_time: '00:00'
+  weekly_report_day: 'sunday'  # يوم التقرير الأسبوعي
+  weekly_report_time: '00:00'
+  
+  # ما الرسائل التي يجب إرسالها؟
+  notifications:
+    send_entry_signal: true        # عند فتح صفقة
+    send_exit_signal: true         # عند إغلاق صفقة
+    send_tp_signals: true          # عند تحقيق أهداف الربح
+    send_sl_signals: true          # عند تفعيل وقف الخسارة
+    send_error_alerts: true        # عند حدوث أخطاء
+    send_daily_report: true        # التقرير اليومي
+    send_weekly_report: true       # التقرير الأسبوعي
+    send_status_on_startup: true   # عند بدء البوت
+  
+  # تنسيق الرسائل
+  message_format:
+    include_charts: false          # هل نرسل رسوم بيانية؟ (يزيد الحجم)
+    include_full_analysis: true    # هل نرسل تحليل مفصل؟
+    language: 'ar'                 # اللغة: 'ar' أو 'en'
+
+# ─────────────────────────────────────────────────────────
+# إعدادات قاعدة البيانات (Database Settings)
+# ─────────────────────────────────────────────────────────
+database:
+  type: 'sqlite'  # 'sqlite' أو 'postgresql'
+  
+  # SQLite
+  sqlite:
+    path: './data/trading_bot.db'
+  
+  # PostgreSQL (اختياري)
+  postgresql:
+    host: 'localhost'
+    port: 5432
+    user: 'bot_user'
+    password: 'your_password'
+    database: 'trading_bot'
+  
+  # حفظ نسخة احتياطية؟
+  auto_backup: true
+  backup_interval_days: 7
+
+# ─────────────────────────────────────────────────────────
+# إعدادات التسجيل (Logging Settings)
+# ─────────────────────────────────────────────────────────
+logging:
+  level: 'INFO'  # 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+  
+  file:
+    enabled: true
+    path: './logs/bot.log'
+    max_size_mb: 100  # حجم الملف الواحد
+    backup_count: 10  # عدد الملفات المحفوظة
+  
+  console:
+    enabled: true
+    format: 'colored'  # 'colored' أو 'plain'
+
+# ─────────────────────────────────────────────────────────
+# إعدادات الأداء (Performance Settings)
+# ─────────────────────────────────────────────────────────
+performance:
+  # هل تتحقق من الأداء بشكل فوري؟
+  monitor_performance: true
+  
+  # تنبيه إذا كانت Latency عالية
+  alert_on_high_latency_ms: 1000
+  
+  # هل تسجل الرسائل المفصلة؟ (يبطء البوت)
+  debug_mode: false
+  
+  # الحد الأقصى لعدد الطلبات في الثانية
+  api_calls_per_second: 10
+
+# ─────────────────────────────────────────────────────────
+# خيارات متقدمة (Advanced Options)
+# ─────────────────────────────────────────────────────────
+advanced:
+  # استخدام الأسعار الفعلية (بطيء) أم الأسعار المتوسطة؟
+  use_real_time_prices: true
+  
+  # هل نقتل الصفقات الضعيفة مبكراً؟
+  kill_weak_trades_early: false
+  
+  # نسبة P&L قبل القتل المبكر
+  weak_trade_pnl_percent: -3.0
+  
+  # هل نستخدم التنبؤات؟ (يتطلب ML)
+  use_ml_predictions: false
+  ml_confidence_threshold: 0.65
+  
+  # هل نستخدم Hedging؟
+  use_hedging: false
+  hedging_ratio: 0.5
+
+# ─────────────────────────────────────────────────────────
+# البيانات الحساسة (يجب وضعها في .env)
+# ─────────────────────────────────────────────────────────
+# لا تضع المفاتيح هنا! استخدم .env
+# BINANCE_API_KEY=
+# BINANCE_SECRET_KEY=
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=

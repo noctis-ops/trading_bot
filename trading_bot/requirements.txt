@@ -1,0 +1,43 @@
+# Binance Exchange & CCXT
+ccxt==4.3.72
+aiohttp==3.9.3
+
+# Data Analysis & Technical Indicators
+pandas==2.2.0
+numpy==1.24.3
+
+# Telegram Bot
+python-telegram-bot==21.0.1
+
+# Database
+peewee==3.17.0
+
+# Configuration & Environment
+python-dotenv==1.0.0
+pyyaml==6.0
+
+# Task Scheduling
+APScheduler==3.10.4
+
+# Logging & Monitoring
+loguru==0.7.2
+
+# Utility & Helpers
+backoff==2.2.1
+requests==2.31.0
+pytz==2023.3
+
+# Machine Learning (Optional - for Level 4)
+tensorflow==2.14.0
+scikit-learn==1.3.2
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Performance Monitoring
+psutil==5.9.6
+
+# Data Visualization (Optional - for backtesting analysis)
+matplotlib==3.8.2
+plotly==5.18.0

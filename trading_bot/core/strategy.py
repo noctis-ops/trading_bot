@@ -1107,4 +1107,4 @@ if __name__ == "__main__":
     print(f"   R:R = {exits.get('risk_reward_ratio', 0):.3f}:1  "
           f"{'✅' if exits.get('valid') else '❌'}")
     print(f"\n📋 الإصدار: v{s.version}")
-STRATEGY_EOF
+

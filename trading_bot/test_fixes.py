@@ -386,6 +386,183 @@ def test_symbol_key_fix():
 
 
 # ══════════════════════════════════════════════════════════
+# Fix 5 / Phase 6: دعم Short/Bearish
+# ══════════════════════════════════════════════════════════
+
+def test_short_support():
+    """التحقق من دعم الـ Short (Phase 6) عبر السلسلة الكاملة"""
+    from core.strategy import TradingStrategy
+    from core.risk_manager import RiskManager
+    from core.order_manager import OrderManager
+    from core.paper_trading import PaperTradingExchange
+
+    # ── إعداد بيانات هابطة اصطناعية ─────────────────────
+    # نزول لطيف (السعر قريب من EMA21 — الشرط السادس يتطلب ≤ 2%)
+    n     = 300
+    close = pd.Series(100 - np.linspace(0, 6, n))
+    def _mk():
+        df = pd.DataFrame({
+            'close': close,
+            'high':  close + 3,
+            'low':   close - 3,
+            'volume': np.full(n, 100.0),
+        })
+        df['ema_slow']   = close.ewm(span=200).mean()
+        df['ema_fast']   = close.ewm(span=50).mean()
+        df['ema_medium'] = close.ewm(span=21).mean()
+        df['adx']        = 40.0
+        df['rsi']        = 40.0
+        macd  = pd.Series(np.linspace(5, -5, n))
+        sig   = pd.Series(np.linspace(3, -3, n))
+        df['macd']       = macd
+        df['macd_signal']= sig
+        df['macd_hist']  = macd - sig
+        df['volume_sma'] = 80.0   # الحجم ثابت 100 > 80 (تأكيد الحجم)
+        return df
+
+    df_1h = _mk(); df_15m = _mk(); df_5m = _mk()
+
+    # ── 1) الاستراتيجية: check_short_signal + exits ────
+    s = TradingStrategy()
+    assert s.version == "1.3", f"الإصدار يجب أن يكون 1.3 وليس {s.version}"
+    assert hasattr(s, 'check_short_signal'), "يجب أن توجد check_short_signal()"
+    ok("الإصدار v1.3 + check_short_signal() موجودة ✓")
+
+    short_ok, short_sig = s.check_short_signal(df_1h, df_15m, df_5m)
+    assert short_ok, f"إشارة Short يجب أن تجتاز الشروط على بيانات هابطة: {short_sig.get('reason')}"
+    assert short_sig.get('side') == 'short', "يجب أن تكون الجهة short"
+    ok("check_short_signal() تلتقط الاتجاه الهابط ✓")
+
+    short_exits = s.calculate_short_exits(100.0, 2.0)
+    assert short_exits['stop_loss'] > 100.0, "SL يجب أن يكون فوق الدخول"
+    assert short_exits['take_profit_1'] < 100.0, "TP1 يجب أن يكون تحت الدخول"
+    assert short_exits['risk_reward_ratio'] >= 2.0, "R:R يجب ≥ 2.0"
+    ok(f"calculate_short_exits() صحيحة (SL>Entry, TP<Entry, R:R={short_exits['risk_reward_ratio']:.2f}) ✓")
+
+    # ── 2) RiskManager: حساب الـ stops للـ Short ────────
+    rm = RiskManager(initial_balance=10_000.0)
+    stops = rm.calculate_short_stops(100.0, 2.0)
+    assert stops['valid'], "Stops Short يجب أن تكون صالحة"
+    assert stops['stop_loss'] > 100.0 and stops['take_profit_2'] < stops['take_profit_1'] < 100.0
+    ok("calculate_short_stops() صحيحة (SL فوق، TP تحت) ✓")
+
+    valid_stops, reason = rm.validate_short_stops(100.0, 103.0, 96.0, 91.0)
+    assert valid_stops, f"مستويات Short صحيحة يجب أن تُقبل: {reason}"
+    ok("validate_short_stops() تتحقق من علاقة المستويات ✓")
+
+    # ── 3) OrderManager + Paper: فتح/إغلاق Short ────────
+    ex = PaperTradingExchange(initial_balance=10_000.0)
+    price = {'val': 100.0}
+    ex.fetch_ticker = lambda sym: {'close': price['val']}
+    om = OrderManager(ex, rm)
+
+    pos_data = rm.calculate_position_size(
+        balance=10_000.0, entry_price=100.0,
+        stop_loss_price=stops['stop_loss'], signal_score=80.0, side='short',
+    )
+    signal_data = {'entry_price': 100.0, 'atr': 2.0, 'score': 80.0, 'side': 'short'}
+    r = om.open_short_position('ETH/USDT', signal_data, pos_data, stops)
+    assert r['success'], f"فشل فتح صفقة Short: {r.get('error')}"
+    p = om.get_position_state('ETH/USDT')
+    assert p['side'] == 'short' and p['stop_loss'] > p['entry_price']
+    ok("open_short_position() تفتح صفقة Short بشكل صحيح ✓")
+
+    # نزول السعر → ربح في الـ Short
+    price['val'] = 96.0
+    events = om.check_and_update_positions()
+    reasons = [e['reason'] for e in events]
+    assert 'TAKE_PROFIT_1' in reasons, f"يجب أن يُغلق على TP1: {reasons}"
+    assert not om.has_open_position('ETH/USDT'), "يجب أن تُغلق الصفقة"
+    assert ex.get_available_balance() > 10_000.0, "يجب أن يزيد الرصيد بعد ربح Short"
+    ok(f"إغلاق Short على ربح ({events[0]['reason']}) والرصيد زاد ✓")
+
+    return True
+
+
+def test_backtest_both_directions():
+    """التحقق من backtest_both_directions() (Phase E / 6.6)"""
+    from backtesting.backtesting_advanced import AdvancedBacktestingEngine
+
+    engine = AdvancedBacktestingEngine(initial_balance=10_000.0)
+
+    df_1h, df_15m, df_5m = engine.generate_sample_data(days=90)
+    assert df_1h is not None, "فشل توليد البيانات"
+
+    report = engine.backtest_both_directions(df_1h, df_15m, df_5m)
+    assert isinstance(report, dict), "يجب أن يُعيد dict"
+    assert report.get('status') == 'completed', \
+        f"يجب أن تكون الحالة completed وليس {report.get('status')}"
+
+    # التقرير المنفصل لكل اتجاه + المدمج
+    for key in ['long_report', 'short_report', 'combined_report']:
+        assert key in report, f"يجب أن يحتوي التقرير على {key}"
+        assert 'total_trades' in report[key], f"{key} يجب أن يحوي total_trades"
+
+    # إجمالي صفقات الاتجاهين = صفقات التقرير المدمج
+    long_count  = report['long_report']['total_trades']
+    short_count = report['short_report']['total_trades']
+    combined    = report['combined_report']['total_trades']
+    assert (long_count + short_count) == combined, \
+        "صفقات Long + Short يجب أن تساوي الصفقات المدمجة"
+
+    ok(f"backtest_both_directions() نجح | Long={long_count} + "
+       f"Short={short_count} = {combined} صفقة ✓")
+    return True
+
+
+def test_strategy_selector():
+    """التحقق من StrategySelector (Phase 8.2 / Level 2)"""
+    from core.strategy_selector import StrategySelector
+
+    selector = StrategySelector()
+
+    # الاستراتيجيات الثلاث موجودة
+    assert hasattr(selector, 'trend_following')
+    assert hasattr(selector, 'mean_reversion')
+    assert hasattr(selector, 'breakout')
+    assert selector.trend_following.name == 'trend'
+    assert selector.mean_reversion.name  == 'reversion'
+    assert selector.breakout.name        == 'breakout'
+    ok("StrategySelector يضم الاستراتيجيات الثلاث (trend/reversion/breakout) ✓")
+
+    # بناء DataFrame تجريبي مكتمل المؤشرات
+    n     = 120
+    close = pd.Series(100 + np.linspace(0, 20, n))
+    df = pd.DataFrame({
+        'close': close, 'high': close + 2, 'low': close - 2,
+        'volume': np.full(n, 100.0),
+    })
+    df['ema_slow']   = close.ewm(span=200).mean()
+    df['ema_fast']   = close.ewm(span=50).mean()
+    df['ema_medium'] = close.ewm(span=21).mean()
+    df['rsi']        = 55.0
+    df['macd']       = 0.0
+    df['macd_signal'] = 0.0
+    df['macd_hist']  = 0.0
+    df['atr']        = 2.0
+    df['bb_upper']   = close + 3
+    df['bb_middle']  = close
+    df['bb_lower']   = close - 3
+    df['adx']        = 40.0
+    df['volume_sma'] = 90.0
+
+    # get_scores تُعيد الدرجات الثلاث
+    scores = selector.get_scores('BTC/USDT', df)
+    for k in ['trend', 'reversion', 'breakout']:
+        assert k in scores, f"يجب أن تحتوي الدرجات على {k}"
+        assert 0.0 <= scores[k] <= 100.0, f"درجة {k} يجب أن تكون بين 0-100"
+
+    # select_best_strategy تُعيد مفتاحاً صالحاً ودرجته
+    best, score = selector.select_best_strategy('BTC/USDT', df)
+    assert best in ['trend', 'reversion', 'breakout'], \
+        f"يجب أن تكون الاستراتيجية من الثلاث: {best}"
+    assert scores[best] == score, "يجب أن تطابق درجة المختارة أعلى الدرجات"
+
+    ok(f"StrategySelector اختار '{best}' بدرجة {score:.1f} ✓")
+    return True
+
+
+# ══════════════════════════════════════════════════════════
 # تشغيل جميع الاختبارات
 # ══════════════════════════════════════════════════════════
 
@@ -411,6 +588,15 @@ def main():
     run_test("لا IndexError في Backtesting",        test_backtesting_no_indexerror)
     run_test("تقطيع صحيح بالـ timestamp",           test_timestamp_slicing)
     run_test("إصلاح مفتاح symbol في positions",    test_symbol_key_fix)
+
+    # ── Phase 6: دعم Short/Bearish ───────────────────────
+    print(f"\n{BOLD}{CYAN}━━━ المرحلة 6: دعم Short/Bearish ━━━{RESET}")
+    run_test("دعم Short عبر السلسلة الكاملة",       test_short_support)
+    run_test("backtest_both_directions (Long+Short)", test_backtest_both_directions)
+
+    # ── Phase 8.2: Multi-Strategy Selection (Level 2) ─────
+    print(f"\n{BOLD}{CYAN}━━━ المرحلة 8.2: Multi-Strategy Selection ━━━{RESET}")
+    run_test("StrategySelector (trend/reversion/breakout)", test_strategy_selector)
 
     # ── ملخص النتائج ─────────────────────────────────────
     print("\n" + "═"*65)

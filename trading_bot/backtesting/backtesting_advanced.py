@@ -149,7 +149,7 @@ class AdvancedBacktestingEngine:
 
             # ── توليد بيانات 1H ──────────────────────
             n_1h  = days * 24
-            dates_1h = pd.date_range(end=end_time, periods=n_1h, freq='1H')
+            dates_1h = pd.date_range(end=end_time, periods=n_1h, freq='h')
 
             # Random Walk مع اتجاه صاعد خفيف
             returns_1h = np.random.normal(0.0003, 0.018, n_1h)
@@ -488,6 +488,156 @@ class AdvancedBacktestingEngine:
             return {}
 
     # ═══════════════════════════════════════════════════
+    # Backtesting لكلا الاتجاهين (Long + Short) — Phase E/6.6
+    # ═══════════════════════════════════════════════════
+
+    def backtest_both_directions(
+        self,
+        df_1h:  pd.DataFrame,
+        df_15m: pd.DataFrame,
+        df_5m:  pd.DataFrame,
+        symbol: str = 'BTC/USDT',
+    ) -> Dict:
+        """
+        Backtest كامل لـ Long AND Short:
+        - يفحص كل شمعة لإشارات الاتجاهين
+        - لا يفتح Long وShort في نفس الوقت
+        - تقرير منفصل لكل اتجاه + تقرير مدمج
+
+        يُعيد:
+            long_report    → أداء صفقات الـ Long فقط
+            short_report   → أداء صفقات الـ Short فقط
+            combined_report→ أداء كل الصفقات (مدمج)
+        """
+        try:
+            logger.info("🧪 بدء Backtesting للاتجاهين (Long + Short)...")
+
+            # إعادة ضبط حالة المحرك لهذه المحاكاة المستقلة
+            self.current_balance  = self.initial_balance
+            self.trades           = []
+            self.signals          = []
+            self.positions        = {}
+            self.equity_curve     = [self.initial_balance]
+            self.timestamps       = []
+            self.total_trades     = 0
+            self.winning_trades   = 0
+            self.losing_trades    = 0
+
+            df_1h, df_15m, df_5m = self._ensure_timestamp_index(
+                df_1h, df_15m, df_5m
+            )
+
+            n = len(df_1h)
+            if n < self.MIN_CANDLES:
+                logger.error(
+                    f"❌ بيانات 1H غير كافية: {n} < {self.MIN_CANDLES}"
+                )
+                return {'status': 'insufficient_data'}
+
+            for i in range(self.MIN_CANDLES, n - 1):
+                ts = df_1h.index[i]
+
+                df_1h_slice  = self._get_slice_up_to(df_1h,  ts, n_candles=50)
+                df_15m_slice = self._get_slice_up_to(df_15m, ts, n_candles=80)
+                df_5m_slice  = self._get_slice_up_to(df_5m,  ts, n_candles=80)
+
+                if (len(df_15m_slice) < self.MIN_CANDLES or
+                        len(df_5m_slice)  < self.MIN_CANDLES):
+                    continue
+
+                # ── فتح صفقة واحدة فقط (لا Long وShort معاً) ──
+                if symbol not in self.positions:
+                    # نجرّب Long أولاً ثم Short (نفس ترتيب bot.py)
+                    long_found, long_data = self.strategy.check_buy_signal(
+                        df_1h_slice, df_15m_slice, df_5m_slice
+                    )
+                    if long_found:
+                        self._open_position(
+                            symbol=symbol,
+                            entry_price=long_data['entry_price'],
+                            atr=long_data.get('atr', 100),
+                            timestamp=ts,
+                            side='long',
+                        )
+                        self.signals.append({**long_data, 'side': 'long'})
+                    else:
+                        short_found, short_data = self.strategy.check_short_signal(
+                            df_1h_slice, df_15m_slice, df_5m_slice
+                        )
+                        if short_found:
+                            self._open_position(
+                                symbol=symbol,
+                                entry_price=short_data['entry_price'],
+                                atr=short_data.get('atr', 100),
+                                timestamp=ts,
+                                side='short',
+                            )
+                            self.signals.append({**short_data, 'side': 'short'})
+
+                # ── الخروج (حسب الاتجاه) ───────────────────
+                if symbol in self.positions:
+                    pos           = self.positions[symbol]
+                    current_price = df_1h_slice.iloc[-1]['close']
+
+                    exit_type = None
+                    exit_price = None
+
+                    if pos.get('side') == 'short':
+                        # Short: SL فوق الدخول، TP تحت الدخول
+                        if pos['stop_loss'] and current_price >= pos['stop_loss']:
+                            exit_type, exit_price = 'STOP_LOSS', pos['stop_loss']
+                        elif (pos['take_profit_2'] and
+                              current_price <= pos['take_profit_2']):
+                            exit_type, exit_price = 'TAKE_PROFIT_2', pos['take_profit_2']
+                        elif (pos['take_profit_1'] and
+                              current_price <= pos['take_profit_1']):
+                            exit_type, exit_price = 'TAKE_PROFIT_1', pos['take_profit_1']
+                    else:
+                        exit_triggered, exit_type, exit_price = (
+                            self.strategy.should_exit(
+                                current_price  = current_price,
+                                stop_loss      = pos['stop_loss'],
+                                take_profit_1  = pos['take_profit_1'],
+                                take_profit_2  = pos['take_profit_2'],
+                            )
+                        )
+
+                    if exit_type:
+                        self._close_position(
+                            symbol=symbol,
+                            exit_price=exit_price,
+                            exit_type=exit_type,
+                            timestamp=ts,
+                        )
+
+                # ── تحديث منحنى الأسهم ─────────────────
+                self.equity_curve.append(self.current_balance)
+                self.timestamps.append(ts)
+
+            logger.success(
+                f"✅ انتهى Backtesting للاتجاهين | إجمالي الصفقات: "
+                f"{len(self.trades)}"
+            )
+
+            long_trades  = [t for t in self.trades if t.get('side') == 'long']
+            short_trades = [t for t in self.trades if t.get('side') == 'short']
+
+            return {
+                'status':           'completed',
+                'symbol':           symbol,
+                'total_signals':    len(self.signals),
+                'long_report':      self._build_report(long_trades,  'long'),
+                'short_report':     self._build_report(short_trades, 'short'),
+                'combined_report':  self._build_report(self.trades,  'combined'),
+            }
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في backtest_both_directions: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+
+    # ═══════════════════════════════════════════════════
     # دوال فتح وإغلاق الصفقات
     # ═══════════════════════════════════════════════════
 
@@ -497,15 +647,21 @@ class AdvancedBacktestingEngine:
         entry_price: float,
         atr:         float,
         timestamp,
+        side:        str = 'long',
     ):
         """
         ✅ الإصلاح Bug 2: يأخذ symbol كمعامل صريح
 
-        فتح صفقة جديدة في الـ Backtesting
+        فتح صفقة جديدة في الـ Backtesting — يدعم الاتجاهين:
+            side='long'  → calculate_exits (SL تحت الدخول)
+            side='short' → calculate_short_exits (SL فوق الدخول)
         """
         try:
-            # حساب SL و TP
-            exits = self.strategy.calculate_exits(entry_price, atr)
+            # حساب SL و TP حسب الاتجاه
+            if side == 'short':
+                exits = self.strategy.calculate_short_exits(entry_price, atr)
+            else:
+                exits = self.strategy.calculate_exits(entry_price, atr)
 
             if not exits.get('valid', False):
                 logger.warning(
@@ -515,11 +671,12 @@ class AdvancedBacktestingEngine:
                 )
                 return
 
-            # حساب حجم الصفقة
+            # حساب حجم الصفقة (side-aware)
             pos_size = self.strategy.calculate_position_size(
                 balance         = self.current_balance,
                 entry_price     = entry_price,
                 stop_loss_price = exits['stop_loss'],
+                side            = side,
             )
 
             if not pos_size:
@@ -527,6 +684,7 @@ class AdvancedBacktestingEngine:
 
             trade_data = {
                 'symbol':        symbol,
+                'side':          side,
                 'entry_price':   entry_price,
                 'entry_time':    timestamp,
                 'stop_loss':     exits['stop_loss'],
@@ -537,9 +695,19 @@ class AdvancedBacktestingEngine:
                 'risk_reward':   exits.get('risk_reward_ratio', 0),
             }
 
-            # التحقق من صحة الصفقة
-            if not self.strategy.validate_trade(trade_data):
-                return
+            # التحقق من صحة الصفقة حسب الاتجاه
+            if side == 'short':
+                # هندسة الـ Short: SL فوق الدخول و TP تحت الدخول
+                if not (exits['stop_loss'] > entry_price and
+                        exits['take_profit_1'] < entry_price):
+                    logger.warning(
+                        f"⚠️ هندسة Short غير صحيحة لـ {symbol}"
+                    )
+                    return
+            else:
+                # Long: validate_trade (SL < Entry < TP)
+                if not self.strategy.validate_trade(trade_data):
+                    return
 
             # خصم التكلفة من الرصيد
             cost = entry_price * trade_data['contract_size']
@@ -549,8 +717,9 @@ class AdvancedBacktestingEngine:
             self.positions[symbol] = trade_data
             self.total_trades += 1
 
+            direction = 'SHORT' if side == 'short' else 'LONG'
             logger.info(
-                f"📈 [BT] فتح LONG | {symbol} @ ${entry_price:,.2f} | "
+                f"📈 [BT] فتح {direction} | {symbol} @ ${entry_price:,.2f} | "
                 f"الحجم: {trade_data['contract_size']:.4f} | "
                 f"R:R: {exits['risk_reward_ratio']:.2f} | "
                 f"{timestamp}"
@@ -579,7 +748,11 @@ class AdvancedBacktestingEngine:
             position = self.positions.pop(symbol)
 
             contract_size = position['contract_size']
-            profit = (exit_price - position['entry_price']) * contract_size
+            # الربح حسب الاتجاه (side-aware)
+            if position.get('side') == 'short':
+                profit = (position['entry_price'] - exit_price) * contract_size
+            else:
+                profit = (exit_price - position['entry_price']) * contract_size
             profit_pct = (
                 profit / (position['entry_price'] * contract_size) * 100
                 if contract_size > 0 else 0
@@ -591,6 +764,7 @@ class AdvancedBacktestingEngine:
             # تسجيل النتيجة
             trade = {
                 'symbol':        symbol,
+                'side':          position.get('side', 'long'),
                 'entry_price':   position['entry_price'],
                 'exit_price':    exit_price,
                 'entry_time':    position['entry_time'],
@@ -623,6 +797,83 @@ class AdvancedBacktestingEngine:
     # ═══════════════════════════════════════════════════
     # تقرير الأداء
     # ═══════════════════════════════════════════════════
+
+    def _build_report(self, trades: List[Dict], label: str = '') -> Dict:
+        """
+        بناء تقرير أداء من قائمة صفقات محددة (تُستخدم لتفصيل Long/Short).
+
+        Args:
+            trades: قائمة صفقات (كل صفقة تحوي 'profit' و 'side')
+            label:  'long' | 'short' | 'combined'
+
+        Returns:
+            dict بنفس حقول get_performance_report
+        """
+        if not trades:
+            return {
+                'status':           'no_trades',
+                'label':            label,
+                'total_trades':     0,
+                'winning_trades':   0,
+                'losing_trades':    0,
+                'win_rate':         0,
+                'total_profit':     0,
+                'total_profit_pct': 0,
+                'avg_profit':       0,
+                'avg_win':          0,
+                'avg_loss':         0,
+                'max_profit':       0,
+                'max_loss':         0,
+                'profit_factor':    0,
+                'max_drawdown_pct': 0,
+                'final_balance':    self.current_balance,
+                'roi':              (self.current_balance - self.initial_balance)
+                                    / self.initial_balance * 100
+                                    if self.initial_balance > 0 else 0,
+            }
+
+        df_trades = pd.DataFrame(trades)
+        profits   = df_trades['profit']
+
+        total_profit = profits.sum()
+        wins         = profits[profits > 0]
+        losses       = profits[profits <= 0]
+
+        profit_factor = (
+            wins.sum() / abs(losses.sum())
+            if len(losses) > 0 and losses.sum() != 0
+            else float('inf')
+        )
+
+        return {
+            'status':           'completed',
+            'label':            label,
+            'total_trades':     len(df_trades),
+            'winning_trades':   len(wins),
+            'losing_trades':    len(losses),
+            'win_rate':         len(wins) / len(df_trades) * 100,
+            'total_profit':     total_profit,
+            'total_profit_pct': total_profit / self.initial_balance * 100,
+            'avg_profit':       profits.mean(),
+            'avg_win':          wins.mean()          if len(wins)   > 0 else 0,
+            'avg_loss':         losses.mean()         if len(losses) > 0 else 0,
+            'max_profit':       profits.max(),
+            'max_loss':         profits.min(),
+            'profit_factor':    profit_factor,
+            'max_drawdown_pct': self._max_drawdown_pct(),
+            'final_balance':    self.current_balance,
+            'roi':              (self.current_balance - self.initial_balance)
+                                / self.initial_balance * 100,
+        }
+
+    def _max_drawdown_pct(self) -> float:
+        """حساب أقصى تراجع (Max Drawdown) من منحنى الأسهم."""
+        if len(self.equity_curve) == 0:
+            return 0.0
+        equity = pd.Series(self.equity_curve)
+        peak   = equity.expanding().max()
+        dd     = (equity - peak) / peak * 100
+        return float(dd.min())
 
     def get_performance_report(self) -> Dict:
         """

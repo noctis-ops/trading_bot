@@ -71,6 +71,9 @@ from data.market_data import MarketData
 from core.strategy import TradingStrategy
 from core.risk_manager import RiskManager
 from core.order_manager import OrderManager
+from database.trade_logger import TradeLogger
+from database.models import close_db
+from notifications.telegram_bot import TelegramNotifier
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -138,12 +141,15 @@ class TradingBot:
         strategy      = None,
         risk_manager  = None,
         order_manager = None,
+        trade_logger  = None,
+        notifier      = None,
     ):
         """
         تهيئة TradingBot.
 
         Args:
-            exchange, market_data, strategy, risk_manager, order_manager:
+            exchange, market_data, strategy, risk_manager, order_manager,
+            trade_logger, notifier:
                 معاملات اختيارية لحقن التبعيات (Dependency Injection).
                 تُستخدم فقط للاختبار الآلي (test_bot.py — Phase 4.7) لحقن
                 mocks أو مكونات مُعدَّة مسبقاً. التشغيل الطبيعي عبر main.py
@@ -152,6 +158,11 @@ class TradingBot:
                     exchange = create_exchange()
                     rm = RiskManager(initial_balance=10000)
                     om = OrderManager(exchange, rm)
+
+                trade_logger/notifier (Phase 5.2/5.3) يُبنَيان تلقائياً أيضاً
+                عند عدم حَقنهما:
+                    trade_logger = TradeLogger()      ← تسجيل دائم (SQLite)
+                    notifier     = TelegramNotifier(get_bot=lambda: self)
         """
         if not self.SYMBOLS:
             raise ValueError(
@@ -172,6 +183,19 @@ class TradingBot:
             self.risk_manager  = RiskManager(initial_balance=initial_balance)
 
         self.order_manager = order_manager or OrderManager(self.exchange, self.risk_manager)
+
+        # ── Phase 5.2: التسجيل الدائم (SQLite) ────────────
+        self.trade_logger = trade_logger or TradeLogger()
+        self._db_ready: bool = False   # تُفعَّل عند ensure_db_ready() في run()
+        self._last_logged_closed_count: int = 0   # تتبّع الصفقات المغلقة الجديدة
+
+        # ── Phase 5.3: تنبيهات Telegram ───────────────────
+        self.notifier = notifier or TelegramNotifier(get_bot=lambda: self)
+
+        # ── كشف البيئة (نفس منطق order_manager._is_paper) ─
+        self._environment = (
+            'paper' if hasattr(self.exchange, 'check_and_trigger_orders') else 'live'
+        )
 
         # ── حالة التشغيل ──────────────────────────────────
         self.is_running: bool           = False
@@ -218,7 +242,9 @@ class TradingBot:
         self.start_time      = datetime.utcnow()
 
         self._print_startup_banner()
+        self._ensure_persistence()
         self._notify_startup_status()
+        self.notifier.start()
 
         iteration = 0
         try:
@@ -252,17 +278,24 @@ class TradingBot:
         MAX_CONSECUTIVE_TICK_ERRORS للحماية من حلقة أخطاء لا نهائية).
         """
         try:
+            # 0) أوامر Telegram عن بُعد (/stop /emergency) — تُنفَّذ بأمان
+            #    في نهاية الدورة، لا من خيط Telegram نفسه (راجع telebot)
+            self._process_telegram_commands()
+
             # 1) مراقبة الصفقات المفتوحة أولاً — دائماً، بغض النظر عن
             #    وجود شمعة جديدة. OrderManager يتكفّل داخلياً بمنطق
             #    SL/TP/Breakeven لكلا وضعي paper وlive، ويسجّل النتيجة
             #    تلقائياً عبر risk_manager.register_trade_result()
             self.order_manager.check_and_update_positions()
 
+            # 1b) مزامنة الحالة الدائمة (SQLite) + تنبيهات الخروج (Telegram)
+            self._log_newly_closed_trades()
+
             # 2) البحث عن دخول جديد فقط إذا لم نصل الحد الأقصى العام
             if self.order_manager.get_open_positions_count() < self.MAX_CONCURRENT_POSITIONS:
                 self._scan_for_entries()
 
-            # 3) النبضات الدورية (حالة + ملخص مخاطر)
+            # 3) النبضات الدورية (حالة + ملخص مخاطر + أداء يومي)
             self._heartbeat_if_due()
 
             self._consecutive_tick_errors = 0   # نجحت الدورة — إعادة تصفير العداد
@@ -287,16 +320,22 @@ class TradingBot:
 
     def _scan_for_entries(self):
         """
-        فحص جميع الرموز المُعدَّة بحثاً عن فرصة دخول جديدة.
-        يتوقف فور فتح صفقة واحدة (MAX_CONCURRENT_POSITIONS الحالي = 1).
+        فحص جميع الرموز المُعدَّة بحثاً عن فرصة دخول جديدة (Phase 8.1).
+
+        Multi-Symbol: نمسح كل الرموز ونفتح صفقة على أي رمز لديه إشارة
+        صالحة (طالما لا توجد صفقة مفتوحة عليه أصلاً) حتى الوصول للحد
+        العام max_concurrent_positions. صفقة واحدة لكل رمز كحد أقصى.
         """
         for symbol in self.SYMBOLS:
+            # حد عام على مستوى البوت (تداول 3-5 أزواج في آنٍ واحد)
+            if self.order_manager.get_open_positions_count() >= self.MAX_CONCURRENT_POSITIONS:
+                break
+
+            # تجاهل الرموز التي لديها صفقة مفتوحة أصلاً
             if self.order_manager.has_open_position(symbol):
                 continue
 
-            opened = self._scan_symbol_for_entry(symbol)
-            if opened:
-                break   # صفقة واحدة كحد أقصى لكل دورة — لا نكمل مسح باقي الرموز
+            self._scan_symbol_for_entry(symbol)
 
     def _scan_symbol_for_entry(self, symbol: str) -> bool:
         """
@@ -319,8 +358,12 @@ class TradingBot:
                 return False   # لا شمعة main_timeframe جديدة مغلقة بعد لهذا الرمز
 
             # ── هل التداول مسموح الآن؟ (cooldown / حد الخسارة اليومية) ──
+            # نستدعيها دون تمرير balance (فتستخدم daily_pnl المحسوب فعلياً)
+            # بدلاً من الرصيد المتاح — لأن الرصيد المتاح ينخفض بحجم الهامش
+            # المحجوز لصفقة مفتوحة، فيُقرأ خطأً كخسارة يومية مع صفقات
+            # متزامنة متعددة (Phase 8.1 Multi-Symbol).
             balance = self.exchange.get_available_balance()
-            allowed, reason = self.risk_manager.is_trading_allowed(balance)
+            allowed, reason = self.risk_manager.is_trading_allowed()
             if not allowed:
                 logger.debug(f"⏸️ {symbol}: {reason}")
                 return False
@@ -329,67 +372,234 @@ class TradingBot:
             df_1h = self.market_data.get_complete_dataframe(symbol, self.TREND_TIMEFRAME)
             df_5m = self.market_data.get_complete_dataframe(symbol, self.CONFIRMATION_TIMEFRAME)
 
-            # ── التقرير الشامل: gates + validate_signal + score + MTF ──
-            breakdown = self.strategy.get_signal_breakdown(df_1h, df_main, df_5m)
+            # ── نحاول LONG أولاً (الصعود) ثم SHORT (الهبوط) — لا يُفتح
+            #    الاتجاهان معاً على نفس الرمز في الدورة نفسها ──
+            long_breakdown = self.strategy.get_signal_breakdown(df_1h, df_main, df_5m)
+            if self._execute_signal(symbol, 'long', long_breakdown, df_main, balance):
+                return True
 
-            if not breakdown.get('should_trade', False):
-                logger.debug(
-                    f"➖ {symbol}: {breakdown.get('entry_quality', 'لا إشارة')}"
-                )
-                return False
+            short_breakdown = self.strategy.get_short_signal_breakdown(df_1h, df_main, df_5m)
+            if self._execute_signal(symbol, 'short', short_breakdown, df_main, balance):
+                return True
 
-            signal_data = breakdown['gate_result']
-            score       = breakdown['score_result'].get('total_score', 0)
-            signal_data['score'] = score   # لضمان تسجيلها الصحيح داخل OrderManager
+            return False
 
-            logger.info(
-                f"🔎 إشارة محتملة | {symbol} | Score={score:.1f} | "
-                f"{breakdown.get('entry_quality', '')}"
+        except Exception as e:
+            logger.error(f"❌ خطأ في فحص {symbol}: {e}")
+            return False
+
+    def _execute_signal(
+        self,
+        symbol:    str,
+        direction: str,
+        breakdown: Dict,
+        df_main,
+        balance:   float,
+    ) -> bool:
+        """
+        تنفيذ إشارة (Long أو Short) عبر السلسلة الكاملة الموحّدة:
+            تسجيل الإشارة → حساب SL/TP → تحقق R:R → حجم الصفقة → التنفيذ → إشعار
+
+        تفادي parameter drift: SL/TP دائماً من RiskManager (وليس من
+        strategy.calculate_exits)، سواء لـ Long أو Short.
+
+        Args:
+            symbol:    الزوج
+            direction: 'long' | 'short'
+            breakdown: ناتج get_signal_breakdown() أو get_short_signal_breakdown()
+            df_main:   DataFrame الإطار الرئيسي (نظام التقلب لحجم الصفقة)
+            balance:   الرصيد المتاح
+
+        Returns:
+            True إذا فُتحت صفقة فعلاً، False خلاف ذلك
+        """
+        # ── تسجيل الإشارة دائماً في قاعدة البيانات (سواء أُجريت أم رُفضت) ──
+        if self._db_ready:
+            self.trade_logger.log_signal(symbol, breakdown)
+
+        if not breakdown.get('should_trade', False):
+            logger.debug(
+                f"➖ {symbol} {direction}: {breakdown.get('entry_quality', 'لا إشارة')}"
             )
+            return False
 
-            # ── حساب SL/TP — مصدر وحيد هو RiskManager (تفادي parameter drift) ──
+        signal_data = breakdown['gate_result']
+        score       = breakdown['score_result'].get('total_score', 0)
+        signal_data['score'] = score   # لضمان تسجيلها الصحيح داخل OrderManager
+
+        logger.info(
+            f"🔎 إشارة {direction.upper()} محتملة | {symbol} | Score={score:.1f} | "
+            f"{breakdown.get('entry_quality', '')}"
+        )
+
+        # ── حساب SL/TP — مصدر وحيد هو RiskManager (Long أو Short) ──
+        if direction == 'short':
+            stops = self.risk_manager.calculate_short_stops(
+                signal_data['entry_price'], signal_data['atr']
+            )
+            rr_ok, rr = self.risk_manager.validate_risk_reward_short(
+                signal_data['entry_price'],
+                stops['stop_loss'],
+                stops['take_profit_1'],
+                stops['take_profit_2'],
+            )
+        else:
             stops = self.risk_manager.calculate_stops(
                 signal_data['entry_price'], signal_data['atr']
             )
-            if not stops.get('valid', False):
-                return False   # RiskManager يسجّل تحذيراً بنفسه بالفعل
-
             rr_ok, rr = self.risk_manager.validate_risk_reward(
                 signal_data['entry_price'],
                 stops['stop_loss'],
                 stops['take_profit_1'],
                 stops['take_profit_2'],
             )
-            if not rr_ok:
-                return False
 
-            # ── حساب حجم الصفقة (يأخذ signal_score ونظام التقلب) ────
-            position_data = self.risk_manager.calculate_position_size(
-                balance         = balance,
-                entry_price     = signal_data['entry_price'],
-                stop_loss_price = stops['stop_loss'],
-                signal_score    = score,
-                volatility_df   = df_main,
+        if not stops.get('valid', False):
+            return False   # RiskManager يسجّل تحذيراً بنفسه بالفعل
+        if not rr_ok:
+            return False
+
+        # ── حساب حجم الصفقة (يأخذ signal_score + نظام التقلب + الاتجاه) ──
+        position_data = self.risk_manager.calculate_position_size(
+            balance         = balance,
+            entry_price     = signal_data['entry_price'],
+            stop_loss_price = stops['stop_loss'],
+            signal_score    = score,
+            volatility_df   = df_main,
+            side            = direction,
+        )
+        if not position_data:
+            return False
+
+        # ── التنفيذ الفعلي عبر OrderManager ──────────────────────
+        if direction == 'short':
+            result = self.order_manager.open_short_position(
+                symbol, signal_data, position_data, stops
             )
-            if not position_data:
-                return False
-
-            # ── التنفيذ الفعلي عبر OrderManager ──────────────────────
+        else:
             result = self.order_manager.open_position(
                 symbol, signal_data, position_data, stops
             )
 
-            if not result.get('success', False):
-                logger.warning(
-                    f"⚠️ فشل فتح الصفقة | {symbol} | {result.get('error', 'سبب غير معروف')}"
-                )
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ خطأ في فحص {symbol}: {e}")
+        if not result.get('success', False):
+            logger.warning(
+                f"⚠️ فشل فتح الصفقة {direction} | {symbol} | "
+                f"{result.get('error', 'سبب غير معروف')}"
+            )
             return False
+
+        self._notify_trade_entry(symbol, result, signal_data, position_data)
+        return True
+
+    # ═══════════════════════════════════════════════════
+    # Phase 5 — التسجيل الدائم (SQLite) + تنبيهات Telegram
+    # ═══════════════════════════════════════════════════
+
+    def _ensure_persistence(self):
+        """
+        تهيئة قاعدة البيانات مرة واحدة عند بدء التشغيل (run()).
+
+        فشل التهيئة لا يوقف البوت — يستمر التداول من دون تسجيل دائم
+        (مع تحذير واضح). كل دوال trade_logger مصمَّمة لتعود None بهدوء
+        عند أي فشل لاحق، فلا يسقط البوت بسبب مشكلة في قاعدة البيانات.
+        """
+        if self._db_ready:
+            return
+        self._db_ready = self.trade_logger.ensure_db_ready()
+        if self._db_ready:
+            logger.success(
+                "💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — "
+                "الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً"
+            )
+        else:
+            logger.warning(
+                "⚠️ قاعدة البيانات غير متاحة — سيستمر البوت لكن بدون "
+                "تسجيل دائم (راجع database/models.py)"
+            )
+
+    def _log_newly_closed_trades(self):
+        """
+        تسجيل الصفقات المغلقة الجديدة في قاعدة البيانات + إشعار Telegram.
+
+        يُستدعى بعد كل check_and_update_positions(). نتبّع عدد الصفقات
+        المغلقة (closed_positions) ونسجّل ما زاد عن آخر مرة — وهذا يغطي
+        أيضاً أي صفقات أُغلقت عبر emergency_stop من Telegram بين الدورات.
+        """
+        closed = self.order_manager.closed_positions
+        total  = len(closed)
+
+        if total <= self._last_logged_closed_count:
+            return
+
+        for record in closed[self._last_logged_closed_count:]:
+            if self._db_ready:
+                self.trade_logger.log_trade(
+                    record['symbol'],
+                    record,
+                    environment=self._environment,
+                )
+            self._notify_trade_exit(record)
+
+        self._last_logged_closed_count = total
+
+    def _notify_trade_entry(self, symbol, result, signal_data, position_data):
+        """تنبيه Telegram عند فتح صفقة — لا يفعل شيئاً إذا كان معطّلاً."""
+        try:
+            pos = result.get('position', {})
+            self.notifier.send_trade_entry(
+                symbol        = symbol,
+                side          = pos.get('side', 'long'),
+                entry         = pos.get('entry_price', signal_data.get('entry_price', 0)),
+                contract_size = pos.get('contract_size', position_data.get('contract_size', 0)),
+                leverage      = pos.get('leverage', position_data.get('leverage', 1)),
+                sl            = pos.get('stop_loss', 0),
+                tp1           = pos.get('take_profit_1', 0),
+                tp2           = pos.get('take_profit_2', 0),
+                score         = signal_data.get('score', 0),
+            )
+        except Exception as e:
+            logger.debug(f"⚠️ خطأ في إشعار فتح الصفقة: {e}")
+
+    def _notify_trade_exit(self, record):
+        """تنبيه Telegram عند إغلاق صفقة — لا يفعل شيئاً إذا كان معطّلاً."""
+        try:
+            self.notifier.send_trade_exit(
+                symbol     = record['symbol'],
+                side       = record.get('side', 'long'),
+                entry      = record.get('entry_price', 0),
+                exit_price = record.get('exit_price', 0),
+                pnl        = record.get('pnl', 0),
+                pnl_pct    = record.get('pnl_pct', 0),
+                reason     = record.get('exit_reason', 'UNKNOWN'),
+            )
+        except Exception as e:
+            logger.debug(f"⚠️ خطأ في إشعار إغلاق الصفقة: {e}")
+
+    def _process_telegram_commands(self):
+        """
+        استهلاك أوامر /stop و/emergency من Telegram بأمان.
+
+        الأوامر لا تُنفَّذ من خيط Telegram (حماية من السباق على الحالة)
+        بل تُقف في صفّ وتُعالج هنا في نهاية الدورة الحالية — مع تنبيه
+        المستخدم بردٍّ فوري عند طلبها.
+        """
+        while True:
+            cmd = self.notifier.consume_command()
+            if cmd is None:
+                break
+            command, chat_id = cmd
+
+            if command == 'STOP':
+                logger.warning(
+                    f"🛑 أمر /stop من Telegram (chat_id={chat_id}) — إيقاف آمن"
+                )
+                self.stop()
+            elif command == 'EMERGENCY':
+                logger.critical(
+                    f"🚨 أمر /emergency من Telegram (chat_id={chat_id}) — "
+                    f"إغلاق كل الصفقات فوراً"
+                )
+                self.emergency_stop(reason='TELEGRAM_EMERGENCY_STOP')
 
     # ═══════════════════════════════════════════════════
     # تتبّع الشموع الجديدة (state داخلي — راجع docstring الملف)
@@ -437,6 +647,7 @@ class TradingBot:
         نقطة التمديد الطبيعية لإشعارات Telegram الدورية في Phase 5.
         """
         now = time.time()
+        balance = self.exchange.get_available_balance()
 
         if now - self._last_heartbeat_at >= self.HEARTBEAT_INTERVAL_SECONDS:
             summary = self.order_manager.get_session_summary()
@@ -446,12 +657,24 @@ class TradingBot:
                 daily_pnl    = self.risk_manager.daily_pnl,
                 uptime       = self._get_uptime_str(),
             )
+
+            # ── تحديث أداء اليوم في قاعدة البيانات (آمنة للتكرار) ──
+            if self._db_ready:
+                try:
+                    self.trade_logger.update_daily_performance(
+                        current_balance = balance,
+                        risk_summary    = self.risk_manager.get_risk_summary(
+                            current_balance=balance
+                        ),
+                        session_summary = self.order_manager.get_session_summary(),
+                    )
+                except Exception as e:
+                    logger.debug(f"⚠️ خطأ في تحديث الأداء اليومي: {e}")
+
             self._last_heartbeat_at = now
 
         if now - self._last_risk_summary_at >= self.RISK_SUMMARY_INTERVAL_SECONDS:
-            self.risk_manager.print_risk_summary(
-                current_balance=self.exchange.get_available_balance()
-            )
+            self.risk_manager.print_risk_summary(current_balance=balance)
             self._last_risk_summary_at = now
 
     def _get_uptime_str(self) -> str:
@@ -489,16 +712,19 @@ class TradingBot:
 
     def _notify_startup_status(self):
         """
-        إشعار بدء التشغيل. حالياً عبر logger فقط (لا يوجد Telegram بعد —
-        Phase 5). هذه هي نقطة الربط الجاهزة لإعداد
-        telegram.notifications.send_status_on_startup في config.yaml
-        عندما يُبنى notifications/telegram_bot.py.
+        إشعار بدء التشغيل. عند تفعيل إعداد
+        telegram.notifications.send_status_on_startup في config.yaml،
+        يُرسَل تقرير حالة فوري عبر Telegram (Phase 5.3). وإلا يكتفي
+        بالتسجيل في logger.
         """
         if _telegram_cfg.get('notifications', {}).get('send_status_on_startup', False):
-            logger.info(
-                "📨 send_status_on_startup=true في config.yaml — "
-                "بانتظار Phase 5 (Telegram) لتفعيله فعلياً"
-            )
+            if self.notifier.is_enabled():
+                self.notifier.send_startup_status()
+            else:
+                logger.info(
+                    "📨 send_status_on_startup=true في config.yaml — "
+                    "لكن Telegram غير مفعّل (ضع token في .env)"
+                )
 
     def _shutdown(self):
         """تنظيف وطباعة ملخص الجلسة عند الإيقاف (بأي سبب: طلب المستخدم، خطأ فادح، أو max_iterations)."""
@@ -519,6 +745,16 @@ class TradingBot:
         self.risk_manager.print_risk_summary(
             current_balance=self.exchange.get_available_balance()
         )
+
+        # ── إيقاف خلفية Telegram بأمان ────────────────────
+        try:
+            self.notifier.stop()
+        except Exception as e:
+            logger.debug(f"⚠️ خطأ في إيقاف TelegramNotifier: {e}")
+
+        # ── إغلاق اتصال قاعدة البيانات بأمان (Phase 5.2) ──
+        if self._db_ready:
+            close_db()
 
         logger.info("👋 TradingBot توقف بأمان")
 

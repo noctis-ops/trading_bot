@@ -32,6 +32,14 @@ v1.2 — ميزات جديدة (Feature Update):
     + get_signal_breakdown(): تقرير شامل يجمع gates + score + MTF
     + calculate_position_size() يأخذ signal_score لتحديد حجم الصفقة
     + print_score_report(): طباعة تقرير الدرجة منسقاً
+
+v1.3 — دعم Short/Bearish (Phase 6):
+    + check_short_signal(): 6 شروط معكوسة لفتح صفقة Short
+    + calculate_short_exits(): SL فوق الدخول و TP تحت الدخول (R:R = 2.17)
+    + calculate_short_signal_score(): تقييم 0-100 للاتجاه الهابط
+    + validate_short_signal(): مرآة validate_signal للـ Short
+    + get_short_signal_breakdown(): تقرير Short شامل (مرآة get_signal_breakdown)
+    + get_signal_breakdown_direction(): توزيع تلقائي بين Long و Short
 """
 
 import pandas as pd
@@ -53,6 +61,9 @@ from indicators.trend import (
     get_price_distance_from_ema,
     detect_trend_direction,
     is_ema_aligned_bullish,
+    get_bearish_trend_score,
+    detect_bearish_trend_direction,
+    is_ema_aligned_bearish,
 )
 
 # الزخم — momentum.py
@@ -63,6 +74,8 @@ from indicators.momentum import (
     detect_macd_crossover,
     get_rsi_quality_score,
     get_macd_quality_score,
+    get_bearish_momentum_score,
+    get_bearish_momentum_summary,
 )
 
 # التقلب — volatility.py
@@ -138,6 +151,12 @@ class TradingStrategy:
     RSI_MAX          = 70   # RSI ≤ 70  = لم يبلغ ذروة الشراء
     MAX_EMA_DISTANCE = 2.0  # السعر ≤ 2% من EMA21
 
+    # ══ ثوابت فلترة الـ SHORT (مرايا الصاعد — v1.3) ═════
+    RSI_SHORT_MIN = 30   # RSI ≥ 30 (ليس في ذروة البيع الكامل)
+    RSI_SHORT_MAX = 50   # RSI ≤ 50 (في منطقة الزخم السلبي)
+    RSI_SHORT_IDEAL_MIN = 35   # المنطقة المثالية للـ Short (للتقييم)
+    RSI_SHORT_IDEAL_MAX = 45
+
     # ══ ثوابت نظام التقييم ══════════════════════════════
     WEIGHT_TREND      = 0.40  # وزن درجة الاتجاه
     WEIGHT_MOMENTUM   = 0.40  # وزن درجة الزخم
@@ -151,7 +170,7 @@ class TradingStrategy:
 
     def __init__(self):
         self.name    = "Trend Following + Momentum"
-        self.version = "1.2"
+        self.version = "1.3"
         logger.success(f"✅ استراتيجية جاهزة: {self.name} v{self.version}")
 
     # ═══════════════════════════════════════════════════
@@ -294,6 +313,167 @@ class TradingStrategy:
             return False, {'reason': f'استثناء: {e}', 'conditions': {}}
 
     # ═══════════════════════════════════════════════════
+    # SHORT (المرحلة 6) — المستوى 1: الشروط الستة المعكوسة
+    # ═══════════════════════════════════════════════════
+
+    def check_short_signal(
+        self,
+        df_1h:  pd.DataFrame,
+        df_15m: pd.DataFrame,
+        df_5m:  pd.DataFrame,
+    ) -> Tuple[bool, Dict]:
+        """
+        التحقق من الشروط الستة الصارمة لفتح صفقة Short (مرآة check_buy_signal).
+
+        الشروط (معكوسة عن الصاعد):
+            1. السعر < EMA200        (1H) — downtrend رئيسي
+            2. EMA50 < EMA200        (1H) — Death Cross
+            3. ADX > 25              (15M) — اتجاه هابط قوي
+            4. Volume > SMA20        (15M) — تأكيد الحجم
+            5. RSI بين 30-50         (15M) — منطقة الزخم السلبي
+            6. MACD < Signal         (15M) — زخم هابط
+            [+] السعر ضمن 2% من EMA21 (15M) — جودة الدخول
+
+        Args:
+            df_1h:  DataFrame الإطار الساعي
+            df_15m: DataFrame إطار 15 دقيقة
+            df_5m:  DataFrame إطار 5 دقائق
+
+        Returns:
+            (True,  signal_data) — إذا اجتازت جميع الشروط
+            (False, fail_data)   — إذا فشل أي شرط مع تفاصيل الفشل
+        """
+        try:
+            for name, df in [('1H', df_1h), ('15M', df_15m), ('5M', df_5m)]:
+                if len(df) < 21:
+                    return False, {
+                        'reason': f'بيانات {name} غير كافية ({len(df)} < 21 شمعة)',
+                        'conditions': {},
+                    }
+
+            c1h  = df_1h.iloc[-2]
+            c15m = df_15m.iloc[-2]
+
+            conditions: Dict[str, bool] = {}
+
+            # ── 1️⃣ السعر تحت EMA200 (1H) — downtrend رئيسي ──
+            ema200_1h = float(c1h.get('ema_slow', 0))
+            conditions['1h_price_below_ema200'] = (
+                ema200_1h > 0 and float(c1h['close']) < ema200_1h
+            )
+
+            # ── 2️⃣ EMA50 تحت EMA200 (1H) — Death Cross ──
+            ema50_1h = float(c1h.get('ema_fast', 0))
+            conditions['1h_ema50_below_ema200'] = (
+                ema200_1h > 0 and ema50_1h < ema200_1h
+            )
+
+            # ── 3️⃣ ADX > 25 (15M) — اتجاه قوي هابط ──
+            adx_val = float(c15m.get('adx', 0))
+            conditions['15m_adx_above_25'] = adx_val > self.ADX_THRESHOLD
+
+            # ── 4️⃣ Volume > SMA20 (15M) — تأكيد الحجم ──
+            vol     = float(c15m.get('volume',     0))
+            vol_sma = float(c15m.get('volume_sma', 0))
+            conditions['15m_volume_above_sma20'] = (
+                vol_sma > 0 and vol > vol_sma
+            )
+
+            # ── 5️⃣ RSI بين 30-50 (15M) — منطقة الزخم السلبي ──
+            rsi_val = float(c15m.get('rsi', 50))
+            conditions['15m_rsi_in_range_30_50'] = (
+                self.RSI_SHORT_MIN <= rsi_val <= self.RSI_SHORT_MAX
+            )
+
+            # ── 6️⃣ MACD < Signal (15M) — زخم هابط ──
+            macd_val   = float(c15m.get('macd',        0))
+            signal_val = float(c15m.get('macd_signal', 0))
+            conditions['15m_macd_below_signal'] = macd_val < signal_val
+
+            # ── [+] السعر ضمن 2% من EMA21 (15M) ──
+            ema21_dist = get_price_distance_from_ema(df_15m, 'ema_medium')
+            conditions['15m_price_near_ema21'] = (
+                ema21_dist <= self.MAX_EMA_DISTANCE
+            )
+
+            failed = [k for k, v in conditions.items() if not v]
+            all_passed = len(failed) == 0
+
+            if not all_passed:
+                return False, {
+                    'reason':     f"شروط Short فاشلة ({len(failed)}): {', '.join(failed)}",
+                    'conditions': conditions,
+                    'failed':     failed,
+                }
+
+            atr_val = float(c15m.get('atr', 0))
+            signal_data = {
+                'signal':      'SELL',
+                'side':        'short',
+                'entry_price': float(c15m['close']),
+                'atr':         atr_val,
+                'rsi':         rsi_val,
+                'adx':         adx_val,
+                'macd':        macd_val,
+                'macd_signal': signal_val,
+                'ema21_dist':  ema21_dist,
+                'conditions':  conditions,
+                'all_passed':  True,
+            }
+            return True, signal_data
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في check_short_signal: {e}")
+            return False, {'reason': f'استثناء: {e}', 'conditions': {}}
+
+    # ═══════════════════════════════════════════════════
+    # SHORT — حساب نقاط الخروج (SL فوق، TP تحت)
+    # ═══════════════════════════════════════════════════
+
+    def calculate_short_exits(self, entry_price: float, atr: float) -> Dict:
+        """
+        حساب SL و TP1 و TP2 لصفقة Short (مرآة calculate_exits).
+
+        الاتجاه معكوس عن Long:
+            SL  = Entry + ATR × 1.5   (فوق الدخول — وقف الخسارة للـ Short)
+            TP1 = Entry − ATR × 2.0   (تحت الدخول — 50%)
+            TP2 = Entry − ATR × 4.5   (أعلى هبوطاً — 50%)
+
+        R:R = 3.25 / 1.5 = 2.17 ✓ (نفس النسبة تماماً)
+        """
+        if entry_price <= 0 or atr <= 0:
+            return {'valid': False, 'reason': 'سعر أو ATR صفري أو سالب'}
+
+        stop_loss    = entry_price + (atr * self.ATR_SL_MULT)
+        take_profit1 = entry_price - (atr * self.ATR_TP1_MULT)
+        take_profit2 = entry_price - (atr * self.ATR_TP2_MULT)
+
+        risk   = stop_loss - entry_price
+        reward = (entry_price - take_profit1) * 0.5 + \
+                 (entry_price - take_profit2) * 0.5
+        rr = reward / risk if risk > 0 else 0
+
+        result = {
+            'stop_loss':          stop_loss,
+            'take_profit_1':      take_profit1,
+            'take_profit_2':      take_profit2,
+            'sl_distance':        risk,
+            'sl_distance_pct':    risk / entry_price * 100,
+            'tp1_distance':       entry_price - take_profit1,
+            'tp2_distance':       entry_price - take_profit2,
+            'risk':               risk,
+            'reward':             reward,
+            'risk_reward_ratio':  rr,
+            'valid':              rr >= self.MIN_RISK_REWARD,
+        }
+
+        if not result['valid']:
+            logger.warning(
+                f"⚠️ R:R Short غير كافٍ: {rr:.2f} < {self.MIN_RISK_REWARD}"
+            )
+        return result
+
+    # ═══════════════════════════════════════════════════
     # المستوى 2: validate_signal() — جودة الإشارة
     # (منفصل تماماً عن validate_trade)
     # ═══════════════════════════════════════════════════
@@ -404,6 +584,88 @@ class TradingStrategy:
 
         except Exception as e:
             logger.error(f"❌ خطأ في validate_signal: {e}")
+            return False, {'rejections': [f'استثناء: {e}'], 'is_valid': False}
+
+    # ═══════════════════════════════════════════════════
+    # SHORT — المستوى 2: validate_short_signal() (مرآة validate_signal)
+    # ═══════════════════════════════════════════════════
+
+    def validate_short_signal(
+        self,
+        df_1h:       pd.DataFrame,
+        df_15m:      pd.DataFrame,
+        df_5m:       pd.DataFrame,
+        signal_data: Dict,
+    ) -> Tuple[bool, Dict]:
+        """
+        التحقق من جودة إشارة الـ Short — مرآة validate_signal.
+
+        الشروط:
+            ① score ≥ SCORE_MIN_TRADE (60) — إشارة هابطة قوية كافياً
+            ② ATR كافٍ (ليس صفراً أو قريباً من الصفر)
+            ③ توافق الأطر الزمنية (1H و 15M كلاهما bearish)
+            ④ نظام التقلب مناسب (ليس 'contracting')
+        """
+        try:
+            rejections = []
+            info       = {}
+
+            # ── ① درجة الإشارة الهابطة ──────────────────
+            score_result = self.calculate_short_signal_score(df_1h, df_15m, df_5m)
+            total_score  = score_result.get('total_score', 0)
+            info['score_result'] = score_result
+
+            if total_score < self.SCORE_MIN_TRADE:
+                rejections.append(
+                    f"درجة الإشارة {total_score:.1f} < الحد الأدنى {self.SCORE_MIN_TRADE}"
+                )
+
+            # ── ② ATR كافٍ ─────────────────────────────
+            entry_price = float(signal_data.get('entry_price', 0))
+            atr_val     = float(signal_data.get('atr', 0))
+            atr_ratio   = atr_val / entry_price if entry_price > 0 else 0
+            info['atr']       = atr_val
+            info['atr_ratio'] = atr_ratio
+
+            if atr_ratio < self.MIN_ATR_RATIO:
+                rejections.append(
+                    f"ATR ({atr_val:.4f}) أقل من الحد الأدنى "
+                    f"({self.MIN_ATR_RATIO*100:.2f}% من السعر)"
+                )
+
+            # ── ③ توافق الأطر الهابطة ──────────────────
+            mtf = self._analyze_short_multi_timeframe(df_1h, df_15m)
+            info['mtf'] = mtf
+
+            if not mtf.get('aligned', False):
+                rejections.append(
+                    f"الأطر الزمنية غير متوافقة للـ Short: "
+                    f"1H={mtf.get('trend_1h','?')} / "
+                    f"15M={mtf.get('trend_15m','?')}"
+                )
+
+            # ── ④ نظام التقلب مناسب ───────────────────
+            regime = get_volatility_regime(df_15m)
+            info['volatility_regime'] = regime
+
+            if regime == 'contracting':
+                rejections.append(
+                    "نظام التقلب: contracting — السوق في ركود شبه كامل"
+                )
+
+            is_valid = len(rejections) == 0
+            info['rejections'] = rejections
+            info['is_valid']   = is_valid
+
+            info['decision'] = (
+                f"✅ إشارة Short صالحة — Score={total_score:.1f}"
+                if is_valid else
+                f"❌ إشارة Short مرفوضة ({len(rejections)} سبب)"
+            )
+            return is_valid, info
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في validate_short_signal: {e}")
             return False, {'rejections': [f'استثناء: {e}'], 'is_valid': False}
 
     # ═══════════════════════════════════════════════════
@@ -616,6 +878,169 @@ class TradingStrategy:
             logger.error(f"❌ خطأ في _analyze_multi_timeframe: {e}")
             return {'aligned': False, 'error': str(e)}
 
+    # ═══════════════════════════════════════════════════
+    # SHORT — المستوى 3: calculate_short_signal_score() (مرآة)
+    # ═══════════════════════════════════════════════════
+
+    def calculate_short_signal_score(
+        self,
+        df_1h:  pd.DataFrame,
+        df_15m: pd.DataFrame,
+        df_5m:  pd.DataFrame,
+    ) -> Dict:
+        """
+        درجة جودة إشارة الـ Short الموضوعية (0-100) — مرآة calculate_signal_score.
+
+            trend_score     = get_bearish_trend_score(df_1h)       [trend.py]
+            momentum_score  = get_bearish_momentum_score(df_15m)   [momentum.py]
+            volatility_score= get_volatility_score(df_15m)         [volatility.py]
+
+        الأوزان: 40% × trend + 40% × momentum + 20% × volatility (نفس الصاعد)
+        """
+        try:
+            raw_trend      = get_bearish_trend_score(df_1h)
+            raw_momentum   = get_bearish_momentum_score(df_15m)
+            raw_volatility = get_volatility_score(df_15m)
+
+            w_trend      = raw_trend      * self.WEIGHT_TREND
+            w_momentum   = raw_momentum   * self.WEIGHT_MOMENTUM
+            w_volatility = raw_volatility * self.WEIGHT_VOLATILITY
+
+            total = round(min(w_trend + w_momentum + w_volatility, 100.0), 1)
+
+            mtf = self._analyze_short_multi_timeframe(df_1h, df_15m)
+
+            if total >= self.SCORE_STRONG:
+                recommendation = 'strong'
+            elif total >= self.SCORE_MIN_TRADE:
+                recommendation = 'good'
+            else:
+                recommendation = 'weak'
+
+            return {
+                'trend_score':      round(raw_trend,      1),
+                'momentum_score':   round(raw_momentum,   1),
+                'volatility_score': round(raw_volatility, 1),
+                'weighted': {
+                    'trend':      round(w_trend,      1),
+                    'momentum':   round(w_momentum,   1),
+                    'volatility': round(w_volatility, 1),
+                },
+                'total_score':    total,
+                'recommendation': recommendation,
+                'direction':      'short',
+                'mtf_analysis': mtf,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في calculate_short_signal_score: {e}")
+            return {
+                'total_score': 0.0, 'recommendation': 'weak',
+                'trend_score': 0.0, 'momentum_score': 0.0,
+                'volatility_score': 0.0, 'direction': 'short',
+                'weighted': {'trend': 0, 'momentum': 0, 'volatility': 0},
+                'mtf_analysis': {}, 'error': str(e),
+            }
+
+    # ═══════════════════════════════════════════════════
+    # SHORT — التحليل متعدد الأطر للاتجاه الهابط
+    # ═══════════════════════════════════════════════════
+
+    def _analyze_short_multi_timeframe(
+        self,
+        df_1h:  pd.DataFrame,
+        df_15m: pd.DataFrame,
+    ) -> Dict:
+        """
+        تحليل توافق الأطر الزمنية للاتجاه الهابط (مرآة _analyze_multi_timeframe).
+
+        القاعدة الذهبية للـ Short:
+            كلا الإطارين bearish → توافق كامل → أعلى احتمال نجاح
+        """
+        try:
+            trend_1h  = detect_bearish_trend_direction(df_1h)
+            trend_15m = detect_bearish_trend_direction(df_15m)
+            aligned   = (trend_1h == 'bearish' and trend_15m == 'bearish')
+
+            last_1h  = df_1h.iloc[-2]  if len(df_1h)  >= 2 else df_1h.iloc[-1]
+            adx_1h   = float(last_1h.get('adx', 0))
+            rsi_1h   = float(last_1h.get('rsi', 50))
+
+            last_15m = df_15m.iloc[-2] if len(df_15m) >= 2 else df_15m.iloc[-1]
+            adx_15m  = float(last_15m.get('adx',  0))
+            rsi_15m  = float(last_15m.get('rsi',  50))
+            atr_15m  = float(last_15m.get('atr',  0))
+
+            crossover = detect_macd_crossover(df_15m)
+
+            ema_bearish_1h  = is_ema_aligned_bearish(df_1h)
+            ema_bearish_15m = is_ema_aligned_bearish(df_15m)
+
+            alignment_score = 0
+            if trend_1h  == 'bearish': alignment_score += 20
+            if trend_15m == 'bearish': alignment_score += 15
+            if aligned:                alignment_score +=  5
+
+            # ── حقول وصفية إضافية (مرآة كاملة لنسخة Long) ──
+            rsi_zone_1h   = get_rsi_zone(rsi_1h)
+            rsi_zone_15m  = get_rsi_zone(rsi_15m)
+            strength_1h   = get_trend_strength_label(adx_1h)
+            strength_15m  = get_trend_strength_label(adx_15m)
+            regime_15m    = get_volatility_regime_label(get_volatility_regime(df_15m))
+
+            return {
+                'trend_1h':          trend_1h,
+                'trend_15m':         trend_15m,
+                'aligned':           aligned,
+                'alignment_score':   alignment_score,
+                'ema_aligned_1h':    ema_bearish_1h,
+                'ema_aligned_15m':   ema_bearish_15m,
+                'adx_1h':            adx_1h,
+                'adx_15m':           adx_15m,
+                'rsi_1h':            rsi_1h,
+                'rsi_15m':           rsi_15m,
+                'rsi_zone_1h':       rsi_zone_1h,
+                'rsi_zone_15m':      rsi_zone_15m,
+                'atr_15m':           atr_15m,
+                'macd_crossover':    crossover,
+                'trend_strength_1h':  strength_1h,
+                'trend_strength_15m': strength_15m,
+                'volatility_regime':  regime_15m,
+                'alignment_quality': self._rate_short_alignment_quality(
+                    aligned=aligned, ema_1h=ema_bearish_1h, ema_15m=ema_bearish_15m,
+                    crossover=crossover, adx_1h=adx_1h, adx_15m=adx_15m,
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في _analyze_short_multi_timeframe: {e}")
+            return {'aligned': False, 'error': str(e)}
+
+    @staticmethod
+    def _rate_short_alignment_quality(
+        aligned:   bool,
+        ema_1h:    bool,
+        ema_15m:   bool,
+        crossover: str,
+        adx_1h:    float,
+        adx_15m:   float,
+    ) -> str:
+        """تقييم وصفي لقوة توافق الأطر الهابطة — مرآة _rate_alignment_quality."""
+        if not aligned:
+            return 'weak'
+
+        score = 0
+        if ema_1h:               score += 2   # ترتيب هابط كامل على 1H
+        if ema_15m:              score += 2   # ترتيب هابط كامل على 15M
+        if adx_1h  > 35:         score += 1
+        if adx_15m > 35:         score += 1
+        if crossover == 'bearish_cross': score += 2  # تقاطع هابط حديث
+
+        if   score >= 6: return 'excellent'
+        elif score >= 4: return 'strong'
+        elif score >= 2: return 'moderate'
+        else:            return 'weak'
+
     @staticmethod
     def _rate_alignment_quality(
         aligned:   bool,
@@ -754,6 +1179,109 @@ class TradingStrategy:
         return breakdown
 
     # ═══════════════════════════════════════════════════
+    # SHORT — التقرير الشامل (مرآة get_signal_breakdown)
+    # ═══════════════════════════════════════════════════
+
+    def get_short_signal_breakdown(
+        self,
+        df_1h:  pd.DataFrame,
+        df_15m: pd.DataFrame,
+        df_5m:  pd.DataFrame,
+    ) -> Dict:
+        """
+        تقرير شامل لإشارة الـ Short — مرآة get_signal_breakdown.
+
+        يجمع:
+            gates → validate_short_signal → score → MTF → القرار النهائي
+        """
+        ts = datetime.utcnow().isoformat()
+
+        gate_passed, gate_result = self.check_short_signal(df_1h, df_15m, df_5m)
+
+        breakdown: Dict = {
+            'timestamp':   ts,
+            'direction':   'short',
+            'gate_passed': gate_passed,
+            'gate_result': gate_result,
+        }
+
+        if not gate_passed:
+            breakdown.update({
+                'signal_valid':  False,
+                'should_trade':  False,
+                'entry_quality': 'rejected_by_gates',
+                'score_result':  {'total_score': 0, 'recommendation': 'weak'},
+            })
+            return breakdown
+
+        score_result = self.calculate_short_signal_score(df_1h, df_15m, df_5m)
+        breakdown['score_result'] = score_result
+
+        signal_valid, validation_info = self.validate_short_signal(
+            df_1h, df_15m, df_5m, gate_result
+        )
+        breakdown['signal_valid']    = signal_valid
+        breakdown['validation_info'] = validation_info
+
+        try:
+            breakdown['momentum_detail']   = get_bearish_momentum_summary(df_15m)
+            breakdown['volatility_detail'] = get_volatility_summary(df_15m)
+        except Exception as e:
+            logger.warning(f"⚠️ خطأ في ملخصات مؤشرات الـ Short: {e}")
+
+        breakdown['should_trade'] = gate_passed and signal_valid
+
+        total = score_result.get('total_score', 0)
+        rec   = score_result.get('recommendation', 'weak')
+        mtf   = score_result.get('mtf_analysis', {})
+        aq    = mtf.get('alignment_quality', 'weak')
+
+        if not signal_valid:
+            rejections = validation_info.get('rejections', [])
+            breakdown['entry_quality'] = (
+                f"Short مرفوضة بـ validate_signal: {'; '.join(rejections)}"
+            )
+        elif rec == 'strong' and aq in ('excellent', 'strong'):
+            breakdown['entry_quality'] = (
+                f"✅ Short ممتاز — Score={total:.0f} | توافق: {aq}"
+            )
+        elif rec == 'strong':
+            breakdown['entry_quality'] = f"✅ Short قوي — Score={total:.0f}"
+        elif rec == 'good':
+            breakdown['entry_quality'] = f"⚡ Short جيد — Score={total:.0f} | حجم: 75%"
+        else:
+            breakdown['entry_quality'] = (
+                f"⚠️ Short ضعيف — Score={total:.0f} — تجاوز الحد الأدنى بالكاد"
+            )
+
+        return breakdown
+
+    # ═══════════════════════════════════════════════════
+    # توزيع التقرير تلقائياً بين Long و Short
+    # ═══════════════════════════════════════════════════
+
+    def get_signal_breakdown_direction(
+        self,
+        direction: str,
+        df_1h:  pd.DataFrame,
+        df_15m: pd.DataFrame,
+        df_5m:  pd.DataFrame,
+    ) -> Dict:
+        """
+        توزيع تحليل الإشارة بين الاتجاهين (Long/Short).
+
+        Args:
+            direction: 'long' | 'short'
+            df_1h, df_15m, df_5m: الأطر الزمنية
+
+        Returns:
+            ناتج get_signal_breakdown() أو get_short_signal_breakdown()
+        """
+        if direction == 'short':
+            return self.get_short_signal_breakdown(df_1h, df_15m, df_5m)
+        return self.get_signal_breakdown(df_1h, df_15m, df_5m)
+
+    # ═══════════════════════════════════════════════════
     # حساب حجم الصفقة (مُحدَّث: يأخذ signal_score)
     # ═══════════════════════════════════════════════════
 
@@ -764,6 +1292,7 @@ class TradingStrategy:
         stop_loss_price: float,
         max_leverage:    int   = None,
         signal_score:    float = 100.0,
+        side:            str   = 'long',
     ) -> Dict:
         """
         حساب حجم الصفقة الديناميكي.
@@ -773,9 +1302,13 @@ class TradingStrategy:
             score 60-79→ size_factor = 0.75  (75%) — إشارة جيدة
             score < 60 → size_factor = 0.50  (50%) — احتياطي (نادر)
 
+        v1.3: يأخذ side لتحديد علاقة SL بالدخول:
+            side='long'  → SL تحت الدخول  (stop_distance = entry - SL)
+            side='short' → SL فوق الدخول  (stop_distance = SL - entry)
+
         الصيغة:
             risk_amount       = balance × 2% × size_factor
-            stop_distance_pct = (entry - SL) / entry
+            stop_distance_pct = |entry - SL| / entry
             position_notional = risk_amount / stop_distance_pct
             leverage          = min(notional / balance, max_leverage)
             contract_size     = notional / entry_price
@@ -786,6 +1319,7 @@ class TradingStrategy:
             stop_loss_price: سعر وقف الخسارة
             max_leverage:    الرافعة القصوى (افتراضي: 10)
             signal_score:    درجة الإشارة (0-100)
+            side:            'long' | 'short'
 
         Returns:
             dict بجميع معاملات الحجم، أو {} عند فشل التحقق
@@ -798,11 +1332,21 @@ class TradingStrategy:
                 logger.warning("⚠️ مدخلات غير صالحة في calculate_position_size")
                 return {}
 
-            if stop_loss_price >= entry_price:
-                logger.warning(
-                    f"⚠️ SL ({stop_loss_price:.2f}) ≥ Entry ({entry_price:.2f})"
-                )
-                return {}
+            # ── تحقق من اتجاه العلاقة حسب الجانب ────────
+            if side == 'short':
+                # SL للـ Short فوق الدخول
+                if stop_loss_price <= entry_price:
+                    logger.warning(
+                        f"⚠️ SL Short ({stop_loss_price:.2f}) ≤ Entry ({entry_price:.2f})"
+                    )
+                    return {}
+            else:
+                # SL للـ Long تحت الدخول
+                if stop_loss_price >= entry_price:
+                    logger.warning(
+                        f"⚠️ SL ({stop_loss_price:.2f}) ≥ Entry ({entry_price:.2f})"
+                    )
+                    return {}
 
             # ── معامل الحجم حسب درجة الإشارة ─────────────
             if signal_score >= self.SCORE_STRONG:
@@ -812,9 +1356,9 @@ class TradingStrategy:
             else:
                 size_factor = 0.50
 
-            # ── حسابات الحجم ─────────────────────────────
+            # ── حسابات الحجم (المسافة كقيمة مطلقة للاتجاهين) ──
             risk_amount       = balance * self.RISK_PER_TRADE * size_factor
-            stop_distance     = entry_price - stop_loss_price
+            stop_distance     = abs(entry_price - stop_loss_price)
             stop_distance_pct = stop_distance / entry_price
 
             if stop_distance_pct <= 0:
@@ -835,6 +1379,7 @@ class TradingStrategy:
                 'contract_size':      round(contract_size, 6),
                 'size_factor':        size_factor,
                 'signal_score':       signal_score,
+                'side':               side,
             }
 
         except Exception as e:

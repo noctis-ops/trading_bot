@@ -360,3 +360,129 @@ def get_trend_strength_label(adx_value: float) -> str:
     elif adx_value > 25: return 'قوي       ✅'
     elif adx_value > 20: return 'ضعيف      ⚠️'
     else:                return 'راكد      ❌'
+
+
+# ═══════════════════════════════════════════════════════
+# دعم الاتجاه الهابط (SHORT) — مرايا للدوال الصاعدة أعلاه
+# ═══════════════════════════════════════════════════════
+# الاستراتيجية الحالية (v1.2) كانت Long-Only. لإضافة دعم
+# Short (المرحلة 6) نضيف هنا مرايا (mirrors) لدوال الاتجاه
+# الصاعد، بنفس الجودة والمنطق تماماً لكن معكوس الاتجاه.
+
+def is_ema_aligned_bearish(df: pd.DataFrame) -> bool:
+    """
+    التحقق من التوافق الكامل للـ EMA في الاتجاه الهابط
+
+    الشرط: EMA21 < EMA50 < EMA200
+            (ترتيب تنازلي = اتجاه هابط قوي = Death Cross كامل)
+            مع كون السعر تحت EMA21 (تأكيد الضغط البيعي)
+
+    Args:
+        df: DataFrame مع ema_slow, ema_fast, ema_medium, close
+
+    Returns:
+        True إذا كان الترتيب ema_medium < ema_fast < ema_slow
+    """
+    if df.empty or len(df) < 2:
+        return False
+
+    last = df.iloc[-2]
+    ema200 = last.get('ema_slow',   0)
+    ema50  = last.get('ema_fast',   0)
+    ema21  = last.get('ema_medium', 0)
+    close  = last['close']
+
+    return (
+        0 < ema200 and
+        0 < ema50  < ema200 and
+        0 < ema21  < ema50 and
+        close < ema21
+    )
+
+
+def detect_bearish_trend_direction(df: pd.DataFrame) -> str:
+    """
+    كشف الاتجاه الهابط بنفس جودة detect_trend_direction.
+
+    المنطق (مرآة الاتجاه الصاعد):
+        bearish  ← EMA50 < EMA200 AND ADX > 20 AND price < EMA200
+        sideways ← ADX < 20 (سوق راكد بغض النظر عن EMAs)
+        bullish  ← خلاف ذلك (إشارة معاكسة ضعيفة)
+
+    Args:
+        df: DataFrame مع close, ema_slow, ema_fast, adx
+
+    Returns:
+        'bearish' | 'sideways' | 'bullish'
+    """
+    if df.empty or len(df) < 2:
+        return 'sideways'
+
+    last = df.iloc[-2]
+
+    adx_val  = last.get('adx', 0)
+    close    = last['close']
+    ema_slow = last.get('ema_slow', close)
+    ema_fast = last.get('ema_fast', close)
+
+    if adx_val < 20:
+        return 'sideways'
+
+    if close < ema_slow and ema_fast < ema_slow:
+        return 'bearish'
+
+    if close > ema_slow and ema_fast > ema_slow:
+        return 'bullish'
+
+    return 'sideways'
+
+
+def get_bearish_trend_score(df: pd.DataFrame) -> float:
+    """
+    نقاط جودة الاتجاه الهابط (0-100) — مرآة get_trend_score.
+
+    المعايير (معكوسة عن الصاعدة):
+        ADX strength  (0-40) — نفس التدرّج (قوة الاتجاه بغض النظر عن الجهة)
+
+        Bearish EMA alignment (0-30):
+            price < EMA200                  → 10 نقطة
+            EMA50 < EMA200                  → 10 نقطة
+            EMA21 < EMA50 < EMA200          → 10 نقطة (ترتيب هابط كامل)
+
+        EMA distance (0-30) — نفس منطق المسافة (قرب الدخول من EMA21)
+
+    Args:
+        df: DataFrame مع close, ema_slow, ema_fast, ema_medium, adx
+
+    Returns:
+        float: نقاط الاتجاه الهابط (0-100)
+    """
+    if df.empty or len(df) < 2:
+        return 0.0
+
+    last   = df.iloc[-2]
+    score  = 0.0
+    close  = last['close']
+    ema200 = last.get('ema_slow',   close)
+    ema50  = last.get('ema_fast',   close)
+    ema21  = last.get('ema_medium', close)
+    adx    = last.get('adx', 0)
+
+    # ── ADX Strength (0-40) — نفس التدرّج الصاعد ──────
+    if   adx > 50:  score += 40
+    elif adx > 35:  score += 30
+    elif adx > 25:  score += 20
+    elif adx > 20:  score += 10
+
+    # ── Bearish EMA Alignment (0-30) ───────────────────
+    if ema200 > 0 and close < ema200:  score += 10
+    if ema200 > 0 and ema50 < ema200:  score += 10
+    if ema50  > 0 and ema21 < ema50:   score += 10  # ترتيب هابط كامل
+
+    # ── EMA Distance (0-30) — نفس منطق الصاعد ─────────
+    distance = get_price_distance_from_ema(df, 'ema_medium')
+    if   distance < 0.5: score += 30
+    elif distance < 1.0: score += 20
+    elif distance < 2.0: score += 10
+
+    return min(score, 100.0)

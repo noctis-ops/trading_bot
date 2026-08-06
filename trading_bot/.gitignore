@@ -39,6 +39,7 @@ MANIFEST
 
 # البيئة الافتراضية
 venv/
+.venv/
 env/
 ENV/
 env.bak/

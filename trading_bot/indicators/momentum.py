@@ -351,3 +351,200 @@ def get_momentum_summary(df: pd.DataFrame) -> Dict:
         # Score
         'momentum_score':   get_momentum_score(df),
     }
+
+
+# ═══════════════════════════════════════════════════════
+# دعم الزخم الهابط (SHORT) — مرايا لدوال الزخم الصاعد
+# ═══════════════════════════════════════════════════════
+
+# منطقة الزخم السلبي (المرآة الصاعدة 50-70)
+RSI_SHORT_MIN = 30   # RSI ≥ 30 (ليس في ذروة البيع الكامل)
+RSI_SHORT_MAX = 50   # RSI ≤ 50 (في منطقة الهبوط/الزخم السلبي)
+
+
+def get_rsi_quality_score_bearish(rsi_value: float) -> float:
+    """
+    نقاط جودة RSI للـ Short (0-40) — مرآة get_rsi_quality_score.
+
+    المنطق (معكوس عن الصاعدة):
+        RSI خارج 30-50      →  0 نقطة (لا تستوفي شرط الاستراتيجية الهابطة)
+        RSI في 45-50        → 20 نقطة (بداية المنطقة — مقبول)
+        RSI في 35-45        → 40 نقطة (المنطقة المثالية للـ Short)
+        RSI في 30-35        → 25 نقطة (يُقبل لكن قريب من ذروة البيع)
+
+    Args:
+        rsi_value: قيمة RSI
+
+    Returns:
+        float: نقاط الجودة (0-40)
+    """
+    if rsi_value < RSI_SHORT_MIN or rsi_value > RSI_SHORT_MAX:
+        return 0.0
+    if 35 <= rsi_value <= 45:
+        return 40.0   # المنطقة المثالية للـ Short
+    if 45 < rsi_value <= 50:
+        return 20.0   # مقبول
+    if 30 <= rsi_value < 35:
+        return 25.0   # يُقبل لكن قريب من ذروة البيع
+    return 0.0
+
+
+def is_macd_bearish(df: pd.DataFrame) -> bool:
+    """
+    التحقق من أن MACD في حالة هبوطية
+
+    الشرط: MACD < خط الإشارة (macd_signal)
+    هذا هو الشرط الخامس في استراتيجية الـ Short.
+
+    Args:
+        df: DataFrame مع عمودي macd و macd_signal
+
+    Returns:
+        True إذا كان MACD أسفل من خط الإشارة
+    """
+    if df.empty or len(df) < 2:
+        return False
+
+    last = df.iloc[-2]
+    return last.get('macd', 0) < last.get('macd_signal', 0)
+
+
+def get_macd_quality_score_bearish(df: pd.DataFrame) -> float:
+    """
+    نقاط جودة MACD للـ Short (0-30) — مرآة get_macd_quality_score.
+
+    المعايير (معكوسة عن الصاعدة):
+        macd < signal                      → 15 نقطة (شرط أساسي)
+        histogram يتناقص (أصغر من السابق)  → 10 نقطة (زخم هابط متسارع)
+        macd < 0 (تحت خط الصفر)          →  5 نقاط (تأكيد إضافي)
+
+    Args:
+        df: DataFrame مع macd, macd_signal, macd_hist
+
+    Returns:
+        float: نقاط الجودة (0-30)
+    """
+    if df.empty or len(df) < 3:
+        return 0.0
+
+    last = df.iloc[-2]
+    prev = df.iloc[-3]
+
+    macd_val    = last.get('macd',        0)
+    signal_val  = last.get('macd_signal', 0)
+    hist_curr   = last.get('macd_hist',   0)
+    hist_prev   = prev.get('macd_hist',   0)
+
+    score = 0.0
+
+    # شرط الاستراتيجية الأساسي
+    if macd_val < signal_val:
+        score += 15.0
+
+    # الهيستوجرام يتناقص (زخم هابط متسارع)
+    if hist_curr < hist_prev:
+        score += 10.0
+
+    # MACD تحت خط الصفر (تأكيد إضافي)
+    if macd_val < 0:
+        score += 5.0
+
+    return min(score, 30.0)
+
+
+def get_bearish_momentum_score(df: pd.DataFrame) -> float:
+    """
+    نقاط الزخم الهابط الإجمالية (0-100) — مرآة get_momentum_score.
+
+    التوزيع (معكوس عن الصاعد):
+        RSI bearish quality   → 0-40 نقطة
+        MACD bearish quality  → 0-30 نقطة
+        Volume strength       → 0-20 نقطة
+        Crossover bonus       → 0-10 نقطة
+
+    Args:
+        df: DataFrame مع: close, rsi, macd, macd_signal,
+                          macd_hist, volume, volume_sma
+
+    Returns:
+        float: نقاط الزخم الهابط (0-100)
+    """
+    if df.empty or len(df) < 3:
+        return 0.0
+
+    last  = df.iloc[-2]
+    score = 0.0
+
+    # ── RSI Bearish Quality (0-40) ─────────────────────
+    rsi_val = last.get('rsi', 50)
+    score  += get_rsi_quality_score_bearish(rsi_val)
+
+    # ── MACD Bearish Quality (0-30) ────────────────────
+    score += get_macd_quality_score_bearish(df)
+
+    # ── Volume Strength (0-20) — نفس منطق الصاعد ───────
+    vol     = last.get('volume',     0)
+    vol_sma = last.get('volume_sma', 1)
+    if vol_sma > 0:
+        vol_ratio = vol / vol_sma
+        if   vol_ratio >= 2.0: score += 20
+        elif vol_ratio >= 1.5: score += 15
+        elif vol_ratio >= 1.0: score += 10
+        # < 1.0 = 0 نقاط
+
+    # ── Crossover Bonus (0-10) ─────────────────────────
+    crossover = detect_macd_crossover(df)
+    if crossover == 'bearish_cross':
+        score += 10   # أفضل توقيت للـ Short
+    elif crossover == 'bearish':
+        score +=  5   # مستمر بدون تقاطع حديث
+
+    return min(score, 100.0)
+
+
+def get_bearish_momentum_summary(df: pd.DataFrame) -> Dict:
+    """
+    ملخص شامل للزخم الهابط — مرآة get_momentum_summary.
+
+    Args:
+        df: DataFrame مكتمل المؤشرات
+
+    Returns:
+        dict بكل قيم الزخم الهابط الحالية
+    """
+    if df.empty or len(df) < 3:
+        return {}
+
+    last = df.iloc[-2]
+
+    rsi_val   = last.get('rsi',         50)
+    macd_val  = last.get('macd',          0)
+    sig_val   = last.get('macd_signal',   0)
+    hist_val  = last.get('macd_hist',     0)
+    vol       = last.get('volume',        0)
+    vol_sma   = last.get('volume_sma',    1)
+
+    crossover = detect_macd_crossover(df)
+
+    return {
+        # RSI
+        'rsi':              rsi_val,
+        'rsi_zone':         get_rsi_zone(rsi_val),
+        'rsi_bearish':      RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX,
+
+        # MACD
+        'macd':             macd_val,
+        'macd_signal':      sig_val,
+        'macd_hist':        hist_val,
+        'macd_bearish':     macd_val < sig_val,
+        'macd_crossover':   crossover,
+
+        # Volume
+        'volume':           vol,
+        'volume_sma':       vol_sma,
+        'volume_ratio':     vol / vol_sma if vol_sma > 0 else 0,
+        'volume_bullish':   vol > vol_sma,
+
+        # Score
+        'bearish_momentum_score': get_bearish_momentum_score(df),
+    }

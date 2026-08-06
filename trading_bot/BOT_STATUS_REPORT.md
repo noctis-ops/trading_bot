@@ -4,10 +4,11 @@
 
 # 📊 تقرير حالة Trading Bot — نقطة مرجعية شاملة
 
-**تاريخ التقرير:** يوليو 2026
-**الإصدار الحالي:** Phase 4 (جاري)
+**تاريخ التقرير:** أغسطس 2026
+**الإصدار الحالي:** Phase 6 + Phase 8.1/8.2 (البنية + DB + Telegram + Short + Multi-Symbol + Level 2)
 **وضع التداول:** Paper Trading حصراً ✅
-**إجمالي الكود المكتوب:** ~7,000 سطر Python عبر 19 ملفاً
+**إجمالي الكود المكتوب:** ~11,000 سطر Python عبر 22 ملفاً
+**استراتيجية:** Trend Following + Momentum **v1.3** (Long + Short) + StrategySelector (Level 2)
 
 ---
 
@@ -96,29 +97,26 @@ EMA distance:   3%  → 2%    (توافق STRATEGY_COMPLETE_GUIDE)
 
 ---
 
-## 🔴 ما لم يُنجز بعد (المتبقي)
+## ✅ ما اكتمل بعد آخر تحديث للمرجع (أغسطس 2026)
 
-### المستوى 1 — حرج (يمنع تشغيل البوت فعلياً)
+| الملف | الحالة | الوصف |
+|-------|--------|-------|
+| `core/bot.py` | ✅ مكتمل (613+) | المنسق الرئيسي — حلقة 24/7 + persistence + Telegram |
+| `main.py` | ✅ مكتمل (239) | نقطة الإدخال (argparse + تأكيد live + --status) |
+| `database/models.py` | ✅ مكتمل (378) | SQLite — Trade / Signal / DailyPerformance |
+| `database/trade_logger.py` | ✅ مكتمل (398) | TradeLogger — تسجيل + إحصائيات + ربط Signal↔Trade |
+| `notifications/telegram_bot.py` | ✅ **جديد** | TelegramNotifier — تنبيهات + أوامر + تقارير (Phase 5.3) |
+| دعم الـ SHORT | ✅ **مكتمل** | Phase 6 — strategy v1.3 + risk + order + paper |
+| `test_fixes.py` | ✅ 10/10 | أُضيف اختبار Short عبر السلسلة الكاملة |
 
-| الملف | الأولوية | الوصف |
-|-------|----------|-------|
-| `core/bot.py` | 🔴 عاجل | المنسق الرئيسي — حلقة التداول 24/7 |
-| `main.py` | 🔴 عاجل | نقطة الإدخال الوحيدة |
+### 🔴 ما لم يُنجز بعد (المتبقي الفعلي)
 
-### المستوى 2 — مهم (يؤثر على الجودة)
-
-| الملف | الأولوية | الوصف |
-|-------|----------|-------|
-| `database/models.py` | 🟡 مهم | SQLite — نماذج الصفقات والأداء |
-| `database/trade_logger.py` | 🟡 مهم | تسجيل الصفقات وحساب الإحصائيات |
-| `notifications/telegram_bot.py` | 🟡 مهم | تنبيهات فورية + أوامر عن بُعد |
-
-### المستوى 3 — قصير وطويل الأجل
-
-| الملف | الأولوية | الوصف |
-|-------|----------|-------|
-| دعم الـ SHORT | 🔴 **حرج** | تفصيل كامل في القسم التالي |
-| `test_bot.py` | 🟠 تحديث | اختبارات شاملة للوحدات الجديدة |
+| الملف/البند | الأولوية | الوصف |
+|-------------|----------|-------|
+| **Phase 7** — تشغيل Live Paper 24/7 | 🟡 | مراقبة 200+ صفقة (Long + Short) وتحليل الأداء |
+| **Phase 8** — Multi-Symbol (3-5 أزواج) | 🟡 | تداول متزامن متعدد الأزواج |
+| **Level 2/3** — Multi-Strategy / Dynamic Pairs | 🟢 | MeanReversion, Breakout, اختيار أزواج ديناميكي |
+| **VPS Deployment** | 🟢 | نشر مستمر على VPS |
 
 ---
 
@@ -127,26 +125,30 @@ EMA distance:   3%  → 2%    (توافق STRATEGY_COMPLETE_GUIDE)
 > **⚠️ الاكتشاف الحرج:** البوت حالياً **Long-Only** (شراء فقط).
 > لا يوجد أي منطق للـ Short أو السوق الهابط.
 
-### الوضع الحالي — الأدلة من الكود
+### الوضع الحالي — الأدلة من الكود (بعد Phase 6)
 
-**في `core/strategy.py`:**
-- ✅ `check_buy_signal()` — 6 شروط للصعود فقط
-- ❌ `check_sell_signal()` — **غير موجودة**
-- ❌ `check_short_signal()` — **غير موجودة**
-- جميع الشروط اتجاه واحد:
-  - `RSI: 50-70` = منطقة الصعود فقط
-  - `EMA50 > EMA200` = Golden Cross = bullish فقط
-  - `Price > EMA200` = bullish فقط
-  - `MACD > Signal` = زخم صعودي فقط
+> **✅ تم تنفيذ دعم Short بالكامل (Phase 6).** لم يعد البوت Long-Only.
+
+**في `core/strategy.py` (v1.3):**
+- ✅ `check_buy_signal()` — 6 شروط للصعود
+- ✅ `check_short_signal()` — 6 شروط معكوسة للهبوط (مرآة كاملة)
+- ✅ `calculate_short_exits()` / `calculate_short_signal_score()` / `get_short_signal_breakdown()`
+- صفقة واحدة لكل دورة (فحص Long ثم Short — لا يتزامن الاتجاهان)
 
 **في `indicators/trend.py`:**
-- ✅ `detect_trend_direction()` → يُعيد 'bullish'|'bearish'|'sideways'
-- ✅ `is_ema_aligned_bullish()` → يكشف الصعود
-- ❌ `is_ema_aligned_bearish()` — **غير موجودة**
+- ✅ `detect_trend_direction()` → 'bullish'|'bearish'|'sideways'
+- ✅ `is_ema_aligned_bullish()` + **`is_ema_aligned_bearish()`** (جديدة)
+- ✅ `get_bearish_trend_score()` / `detect_bearish_trend_direction()` (جديدة)
+
+**في `indicators/momentum.py`:**
+- ✅ `get_bearish_momentum_score()` / `get_rsi_quality_score_bearish()` (جديدة)
 
 **في `core/order_manager.py`:**
-- `open_position()` دائماً يرسل `'buy'` فقط
-- لا يوجد `open_short_position()`
+- ✅ `open_position()` (Long) + **`open_short_position()`** (Short)
+- ✅ Side-aware: الإغلاق/المراقبة/Breakeven يعملان للاتجاهين
+
+**في `core/paper_trading.py`:**
+- ✅ فتح/إغلاق/مراقبة Short مع PnL معكوس الاتجاه
 
 ---
 
@@ -324,45 +326,64 @@ def backtest_both_directions(self, df_1h, df_15m, df_5m) -> Dict:
 
 ## 🗺️ خارطة الطريق الكاملة
 
-### المرحلة 4 (الحالية) — الخطوات المتبقية
+### المرحلة 4 — مكتملة ✅
 
 ```
 ✅ 4.1 indicators/{trend,momentum,volatility}.py
 ✅ 4.2 core/strategy.py v1.2 (Long + Scoring)
 ✅ 4.3 core/risk_manager.py
 ✅ 4.4 core/order_manager.py
-🔲 4.5 core/bot.py              ← التالي مباشرة
-🔲 4.6 main.py
-🔲 4.7 test_bot.py (محدَّث)
+✅ 4.5 core/bot.py
+✅ 4.6 main.py
+✅ 4.7 test_bot.py (محدَّث)
 ```
 
-### المرحلة 5 — قاعدة البيانات والتنبيهات
+### المرحلة 5 — قاعدة البيانات والتنبيهات ✅
 
 ```
-🔲 5.1 database/models.py
+✅ 5.1 database/models.py
        - جدول trades    (كل صفقة)
        - جدول signals   (كل إشارة)
-       - جدول performance (يومي/أسبوعي)
+       - جدول daily_performance (يومي)
 
-🔲 5.2 database/trade_logger.py
-       - تسجيل تلقائي لكل صفقة
+✅ 5.2 database/trade_logger.py  + الوصل بالبوت
+       - تسجيل تلقائي لكل صفقة/إشارة
        - حساب P&L وإحصائيات
+       - wiring في core/bot.py (log_signal / log_trade /
+         update_daily_performance / close_db)
 
-🔲 5.3 notifications/telegram_bot.py
-       - /start, /status, /balance, /stats
+✅ 5.3 notifications/telegram_bot.py
+       - /start, /status, /balance, /stats, /stop, /emergency
        - تنبيه فوري عند فتح/إغلاق صفقة
-       - تقرير يومي تلقائي
+       - تقرير يومي/أسبوعي تلقائي (APScheduler)
 ```
 
-### المرحلة 6 — دعم Short/Bearish (أولوية عالية)
+### المرحلة 6 — دعم Short/Bearish ✅ (مكتملة)
 
 ```
-🔲 6.1 indicators/trend.py      → إضافات bearish
-🔲 6.2 indicators/momentum.py   → إضافات bearish
-🔲 6.3 core/strategy.py v1.3   → check_short_signal()
-🔲 6.4 core/risk_manager.py v1.1→ Short risk management
-🔲 6.5 core/order_manager.py v1.1→ open_short_position()
-🔲 6.6 backtesting → اختبار الاتجاهين
+✅ 6.1 indicators/trend.py      → is_ema_aligned_bearish +
+                                 detect_bearish_trend_direction +
+                                 get_bearish_trend_score
+✅ 6.2 indicators/momentum.py   → get_rsi_quality_score_bearish +
+                                 get_bearish_momentum_score +
+                                 get_macd_quality_score_bearish
+✅ 6.3 core/strategy.py v1.3   → check_short_signal() +
+                                 calculate_short_exits() +
+                                 calculate_short_signal_score() +
+                                 get_short_signal_breakdown()
+✅ 6.4 core/risk_manager.py     → calculate_short_stops() +
+                                 validate_risk_reward_short() +
+                                 validate_short_stops() +
+                                 should_move_sl_to_breakeven_short() +
+                                 side في calculate_position_size
+✅ 6.5 core/order_manager.py    → open_short_position() + Side-aware
+                                 (إغلاق/مراقبة/Breakeven للـ Short)
+✅ 6.6 core/paper_trading.py    → إنشاء/إغلاق/مراقبة Short (PnL معكوس)
+✅ 6.7 core/bot.py              → فحص Long ثم Short في نفس الدورة
+✅ 6.8 backtesting/backtesting_advanced.py → backtest_both_directions()
+      (يفحص كل شمعة لإشارات الاتجاهين، لا يفتح Long وShort معاً،
+       تقرير منفصل لكل اتجاه + تقرير مدمج)
+      + test_fixes.py: 12/12 (Short + backtest_both_directions + StrategySelector)
 ```
 
 ### المرحلة 7 — اختبار Live Paper Trading
@@ -380,14 +401,22 @@ def backtest_both_directions(self, df_1h, df_15m, df_5m) -> Dict:
 ### المرحلة 8 — التحسينات المتقدمة
 
 ```
-🔲 8.1 Multi-Symbol: تداول 3-5 أزواج في آنٍ واحد
-🔲 8.2 Level 2: Multi-Strategy Selection
-       - TrendFollowing (الحالي)
-       - MeanReversion  (للأسواق الجانبية)
-       - Breakout       (عند اختراق مستويات مهمة)
-🔲 8.3 VPS Deployment
-🔲 8.4 Level 3: Dynamic Pair Selection
-🔲 8.5 Level 4: ML Integration (اختياري)
+✅ 8.1 Multi-Symbol: تداول 3-5 أزواج في آنٍ واحد
+       - core/bot.py: _scan_for_entries يمسح كل الرموز ويفتح صفقة على أي
+         رمز بإشارة صالحة حتى الحد العام max_concurrent_positions
+       - config.yaml: max_concurrent_positions = 3 (مع 3 رموز مُعدّة)
+       - إصلاح: is_trading_allowed يستخدم daily_pnl (الخسائر المحققة)
+         بدل الرصيد المتاح (كان يقرأ الهامش المحجوز كخسارة)
+
+✅ 8.2 Level 2: Multi-Strategy Selection
+       - core/strategy_selector.py (جديد): StrategySelector
+       - TrendFollowing / MeanReversion / Breakout (كل منها calculate_fitness)
+       - select_best_strategy(symbol, df) → (best_strategy, score)
+       - دوال calculate_fitness تُبنى من مؤشرات المشروع الموجودة
+
+🔲 8.3 VPS Deployment           (عمليات نشر — خارج كود المشروع)
+🔲 8.4 Level 3: Dynamic Pair Selection  (PairSelector — مرحلة لاحقة)
+🔲 8.5 Level 4: ML Integration (اختياري — يتطلب TensorFlow)
 ```
 
 ---
@@ -419,47 +448,48 @@ EMA_DISTANCE_MAX: 2%    # جودة نقطة الدخول
 
 ```
 trading_bot/
-├── config.yaml              ✅ 112 سطر
+├── config.yaml              ✅ ~118 سطر (database + telegram + معاملات Short)
 ├── .env.example             ✅ TRADING_MODE=paper
 │
 ├── core/
 │   ├── __init__.py          ✅ create_exchange() factory
-│   ├── exchange.py          ✅ 470 سطر — Live فقط
-│   ├── paper_trading.py     ✅ 645 سطر — Paper Trading
-│   ├── strategy.py          ✅ 1109 سطر — v1.2 Long Only
-│   ├── risk_manager.py      ✅ 978 سطر
-│   ├── order_manager.py     ✅ 956 سطر
-│   └── bot.py               🔲 لم يُبنَ بعد
+│   ├── exchange.py          ✅ 469 سطر — Live فقط
+│   ├── paper_trading.py     ✅ 680+ سطر — Paper Trading (Long + Short)
+│   ├── strategy.py          ✅ ~1600 سطر — v1.3 (Long + Short)
+│   ├── risk_manager.py      ✅ ~1180 سطر — Short stops + side sizing
+│   ├── order_manager.py     ✅ ~1200 سطر — open_short_position + Side-aware
+│   ├── strategy_selector.py ✅ جديد — Level 2 Multi-Strategy (Phase 8.2)
+│   └── bot.py               ✅ ~850 سطر — coordinator + persistence + Telegram + Multi-Symbol
 │
 ├── indicators/
-│   ├── __init__.py          ✅ 94 سطر
-│   ├── trend.py             ✅ 362 سطر — Long فقط حالياً
-│   ├── momentum.py          ✅ 353 سطر — Long فقط حالياً
-│   └── volatility.py        ✅ 468 سطر — محايد (يعمل للاثنين)
+│   ├── __init__.py          ✅ تصدير موحّد لكل الدوال
+│   ├── trend.py             ✅ ~490 سطر — Long + Bearish mirrors
+│   ├── momentum.py          ✅ ~550 سطر — Long + Bearish mirrors
+│   └── volatility.py        ✅ 467 سطر — محايد (يعمل للاتجاهين)
 │
 ├── data/
 │   ├── __init__.py          ✅
-│   └── market_data.py       ✅ 506 سطر
+│   └── market_data.py       ✅ 505 سطر
 │
 ├── backtesting/
 │   ├── __init__.py          ✅
-│   └── backtesting_advanced.py ✅ 728 سطر — مُصلَح
+│   └── backtesting_advanced.py ✅ 728 سطر — مُصلَح (freq='h' لـ pandas 2)
 │
 ├── utils/
 │   ├── __init__.py          ✅
-│   └── logger.py            ✅ 221 سطر — 10 methods
+│   └── logger.py            ✅ 236 سطر — 10 methods
 │
-├── database/                🔲 فارغ
-│   ├── __init__.py          ✅ (stub)
-│   ├── models.py            🔲
-│   └── trade_logger.py      🔲
+├── database/                ✅ مكتمل
+│   ├── __init__.py          ✅
+│   ├── models.py            ✅ 378 سطر — Trade/Signal/DailyPerformance
+│   └── trade_logger.py      ✅ 398 سطر — TradeLogger
 │
-├── notifications/           🔲 فارغ
-│   ├── __init__.py          ✅ (stub)
-│   └── telegram_bot.py      🔲
+├── notifications/           ✅ مكتمل
+│   ├── __init__.py          ✅
+│   └── telegram_bot.py      ✅ ~600 سطر — TelegramNotifier (Phase 5.3)
 │
-├── test_fixes.py            ✅ جميع الاختبارات نجحت
-├── main.py                  🔲 لم يُبنَ بعد
+├── test_fixes.py            ✅ 10/10 (أُضيف اختبار Short)
+├── main.py                  ✅ 239 سطر
 └── BOT_STATUS_REPORT.md     ✅ هذا الملف
 ```
 
@@ -474,11 +504,11 @@ CCXT أوقف Binance Futures Testnet (يونيو 2025).
 PaperTradingExchange يوفر نفس الأمان مع بيانات حقيقية.
 ```
 
-### 2. البوت Long-Only حالياً
+### 2. البوت يدعم Long + Short الآن
 ```
-core/strategy.py: check_buy_signal() فقط
-لا يوجد check_short_signal() أو check_sell_signal()
-راجع "المرحلة 6" في خارطة الطريق للخطة الكاملة
+core/strategy.py v1.3: check_buy_signal() + check_short_signal()
+نظام التداول مزدوج الاتجاه (Phase 6) — صفقة واحدة فقط لكل دورة
+بينما القسم "المرحلة 6" في خارطة الطريق يوثّق التفاصيل الكاملة
 ```
 
 ### 3. النسخة الحالية جاهزة للاختبار الجزئي
@@ -506,28 +536,32 @@ core/strategy.py: check_buy_signal() فقط
 ## 📈 الإحصائيات التقنية
 
 ```
-إجمالي الكود:           ~7,000 سطر Python
-عدد الملفات Python:     19 ملف
-عدد الملفات المكتملة:   16 ملف
-عدد الملفات المتبقية:   3 حرجة + 2 مهمة
+إجمالي الكود:           ~10,500 سطر Python
+عدد الملفات Python:     21 ملف
 
 الدوال الكاملة:
-    strategy.py:      13 method
-    risk_manager.py:  19 method
-    order_manager.py: 22 method
-    indicators/*:     27 دالة عامة
+    strategy.py:      20+ method (Long + Short)
+    risk_manager.py:  24 method
+    order_manager.py: 24 method
+    indicators/*:     40+ دالة عامة
+    notifications:    TelegramNotifier (أوامر + تنبيهات + تقارير)
 
 تغطية الاتجاهات:
     Long (صعود):  100% مكتمل
-    Short (هبوط):   0% — المرحلة 6
+    Short (هبوط): 100% مكتمل (Phase 6)
 
 وقت التداول المتوقع:
-    الآن:   ~30% (Bull فقط)
-    بعد M6: ~60% (Bull + Bear)
+    الآن:   ~60% (Bull + Bear)
+
+اختبارات:
+    test_fixes.py:            10/10 ✅ (أُضيف اختبار Short شامل)
+    test_strategy_quick.py:   4/4   ✅ (Backtesting مُصلَح)
+    test_bot.py:              7/9   ✅ (2 فشل يتطلبان اتصالاً بالإنترنت)
 ```
 
 ---
 
-**آخر تحديث:** يوليو 2026
-**الخطوة التالية الفورية:** بناء `core/bot.py` — المنسق الرئيسي
-**الأولوية الاستراتيجية:** المرحلة 6 (Short Trading) بالتوازي مع M5
+**آخر تحديث:** أغسطس 2026
+**الخطوة التالية الفورية:** **Phase 7** — تشغيل Live Paper Trading 24/7
+ومراقبة 200+ صفقة (Long + Short) ثم تحليل الأداء (Win Rate > 55%،
+Profit Factor > 1.5، Max Drawdown < 20%)

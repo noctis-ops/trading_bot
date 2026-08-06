@@ -276,6 +276,170 @@ class RiskManager:
             return False, 0.0
 
     # ═══════════════════════════════════════════════════
+    # SHORT (المرحلة 6) — حساب نقاط SL/TP معكوسة الاتجاه
+    # ═══════════════════════════════════════════════════
+
+    def calculate_short_stops(
+        self,
+        entry_price: float,
+        atr:         float,
+    ) -> Dict:
+        """
+        حساب Stop Loss و Take Profit لصفقة Short (مرآة calculate_stops).
+
+        الاتجاه معكوس عن Long:
+            SL  = Entry + ATR × 1.5   (فوق الدخول)
+            TP1 = Entry − ATR × 2.0   (تحت الدخول)
+            TP2 = Entry − ATR × 4.5   (تحت الدخول أكثر)
+            R:R = 3.25 / 1.5 = 2.17 ✓
+        """
+        if entry_price <= 0 or atr <= 0:
+            logger.warning(
+                f"⚠️ calculate_short_stops: entry_price={entry_price} أو atr={atr} غير صالح"
+            )
+            return {'valid': False, 'reason': 'entry_price أو ATR صفري/سالب'}
+
+        stop_loss    = entry_price + (atr * self.ATR_SL_MULT)
+        take_profit1 = entry_price - (atr * self.ATR_TP1_MULT)
+        take_profit2 = entry_price - (atr * self.ATR_TP2_MULT)
+
+        risk   = stop_loss - entry_price
+        reward = (entry_price - take_profit1) * 0.5 + \
+                 (entry_price - take_profit2) * 0.5
+        rr = reward / risk if risk > 0 else 0
+
+        result = {
+            'stop_loss':          stop_loss,
+            'take_profit_1':      take_profit1,
+            'take_profit_2':      take_profit2,
+            'sl_distance':        risk,
+            'sl_distance_pct':    risk / entry_price * 100,
+            'tp1_distance':       entry_price - take_profit1,
+            'tp2_distance':       entry_price - take_profit2,
+            'risk':               risk,
+            'reward':             reward,
+            'risk_reward_ratio':  rr,
+            'valid':              rr >= self.MIN_RR,
+            'direction':          'short',
+        }
+
+        if result['valid']:
+            logger.debug(
+                f"✓ Stops Short | Entry=${entry_price:,.2f} | "
+                f"SL=${stop_loss:,.2f} | TP1=${take_profit1:,.2f} | "
+                f"TP2=${take_profit2:,.2f} | R:R={rr:.2f}"
+            )
+        else:
+            logger.warning(f"⚠️ R:R Short غير كافٍ: {rr:.2f} < {self.MIN_RR}")
+        return result
+
+    # ═══════════════════════════════════════════════════
+    # SHORT — التحقق من R:R (مرآة validate_risk_reward)
+    # ═══════════════════════════════════════════════════
+
+    def validate_risk_reward_short(
+        self,
+        entry_price:   float,
+        stop_loss:     float,
+        take_profit_1: float,
+        take_profit_2: float,
+    ) -> Tuple[bool, float]:
+        """
+        التحقق من R:R لصفقة Short — SL فوق الدخول، TP تحت الدخول.
+        """
+        try:
+            risk = stop_loss - entry_price
+            if risk <= 0:
+                logger.warning(
+                    f"⚠️ validate_risk_reward_short: "
+                    f"risk ≤ 0 (SL={stop_loss:.2f} ≤ Entry={entry_price:.2f})"
+                )
+                return False, 0.0
+
+            reward = (
+                (entry_price - take_profit_1) * 0.5 +
+                (entry_price - take_profit_2) * 0.5
+            )
+            rr = reward / risk
+
+            is_valid = rr >= self.MIN_RR
+            if not is_valid:
+                logger.warning(
+                    f"⚠️ R:R Short غير كافٍ: {rr:.3f} < {self.MIN_RR}"
+                )
+            return is_valid, round(rr, 4)
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في validate_risk_reward_short: {e}")
+            return False, 0.0
+
+    # ═══════════════════════════════════════════════════
+    # SHORT — التحقق من علاقة مستويات الصفقة
+    # ═══════════════════════════════════════════════════
+
+    def validate_short_stops(
+        self,
+        entry:  float,
+        sl:     float,
+        tp1:    float,
+        tp2:    float,
+    ) -> Tuple[bool, str]:
+        """
+        التحقق من صحة مستويات صفقة Short:
+            SL يجب أن يكون فوق Entry، و TP تحت Entry.
+
+        Returns:
+            (is_valid, reason)
+        """
+        if sl <= entry:
+            return False, f"SL ({sl:.4f}) يجب أن يكون فوق Entry ({entry:.4f})"
+        if tp1 >= entry:
+            return False, f"TP1 ({tp1:.4f}) يجب أن يكون تحت Entry ({entry:.4f})"
+        if tp2 >= tp1:
+            return False, f"TP2 ({tp2:.4f}) يجب أن يكون أقل من TP1 ({tp1:.4f})"
+        return True, "مستويات Short صحيحة"
+
+    # ═══════════════════════════════════════════════════
+    # SHORT — نقل SL إلى Breakeven (مرآة should_move_sl_to_breakeven)
+    # ═══════════════════════════════════════════════════
+
+    def should_move_sl_to_breakeven_short(
+        self,
+        current_price: float,
+        entry_price:   float,
+        take_profit_1: float,
+        current_sl:    float,
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        نقل SL إلى Breakeven لصفقة Short.
+
+        للـ Short: عند نزول السعر إلى TP1 → ننقل SL من فوق الدخول
+        إلى مستوى الدخول نفسه (تأمين رأس المال).
+
+        Args:
+            current_price: السعر الحالي
+            entry_price:   سعر الدخول
+            take_profit_1: هدف الربح الأول (تحت الدخول)
+            current_sl:    SL الحالي (فوق الدخول)
+
+        Returns:
+            (should_move, new_sl)
+        """
+        if not self.MOVE_SL_BREAKEVEN:
+            return False, None
+
+        # السعر نزل إلى TP1 (تحت الدخول) وSL ما زال فوق الدخول
+        if current_price <= take_profit_1 and current_sl > entry_price:
+            logger.info(
+                f"🔄 نقل SL إلى Breakeven (Short) | "
+                f"السعر ${current_price:,.2f} وصل TP1 ${take_profit_1:,.2f} | "
+                f"SL الجديد = ${entry_price:,.2f}"
+            )
+            return True, entry_price
+
+        return False, None
+
+    # ═══════════════════════════════════════════════════
     # ③ حساب حجم الصفقة الديناميكي
     # ═══════════════════════════════════════════════════
 
@@ -286,6 +450,7 @@ class RiskManager:
         stop_loss_price: float,
         signal_score:    float = 100.0,
         volatility_df=None,
+        side:            str   = 'long',
     ) -> Dict:
         """
         حساب حجم الصفقة الديناميكي المُعدَّل بعوامل متعددة.
@@ -328,11 +493,21 @@ class RiskManager:
             if entry_price <= 0 or stop_loss_price <= 0:
                 logger.warning("⚠️ calculate_position_size: أسعار غير صالحة")
                 return {}
-            if stop_loss_price >= entry_price:
-                logger.warning(
-                    f"⚠️ SL ({stop_loss_price:.4f}) ≥ Entry ({entry_price:.4f})"
-                )
-                return {}
+            # ── تحقق من اتجاه العلاقة حسب الجانب (Long/Short) ──
+            if side == 'short':
+                # الـ SL للـ Short فوق الدخول
+                if stop_loss_price <= entry_price:
+                    logger.warning(
+                        f"⚠️ SL Short ({stop_loss_price:.4f}) ≤ Entry ({entry_price:.4f})"
+                    )
+                    return {}
+            else:
+                # الـ SL للـ Long تحت الدخول
+                if stop_loss_price >= entry_price:
+                    logger.warning(
+                        f"⚠️ SL ({stop_loss_price:.4f}) ≥ Entry ({entry_price:.4f})"
+                    )
+                    return {}
 
             # ── ① معامل جودة الإشارة ─────────────────────
             if   signal_score >= 80:  quality_factor = 1.00
@@ -346,7 +521,8 @@ class RiskManager:
             # ── الحساب الأساسي ────────────────────────────
             base_risk         = balance * self.RISK_PCT
             effective_risk    = base_risk * quality_factor * loss_factor
-            stop_distance     = entry_price - stop_loss_price
+            # المسافة تُحسب كقيمة مطلقة لكي تصلح للاتجاهين
+            stop_distance     = abs(entry_price - stop_loss_price)
             stop_distance_pct = stop_distance / entry_price
 
             if stop_distance_pct <= 0:
@@ -404,6 +580,7 @@ class RiskManager:
                 'total_factor':      round(total_factor, 2),
                 'signal_score':      signal_score,
                 'consecutive_losses':self.consecutive_losses,
+                'side':              side,
             }
 
         except Exception as e:

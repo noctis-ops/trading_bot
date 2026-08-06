@@ -1,5 +1,10 @@
 """
-Notifications module - التنبيهات والرسائل
+Notifications module — التنبيهات والرسائل
+
+التصدير:
+- TelegramNotifier : إشعارات Telegram (أوامر + تنبيهات + تقارير) — Phase 5.3
 """
 
-__all__ = []
+from .telegram_bot import TelegramNotifier
+
+__all__ = ['TelegramNotifier']

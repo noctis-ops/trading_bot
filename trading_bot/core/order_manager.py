@@ -278,6 +278,157 @@ class OrderManager:
             return {'success': False, 'error': str(e)}
 
     # ═══════════════════════════════════════════════════
+    # SHORT (المرحلة 6) — فتح صفقة Short كاملة
+    # ═══════════════════════════════════════════════════
+
+    def open_short_position(
+        self,
+        symbol:        str,
+        signal_data:   Dict,
+        position_data: Dict,
+        exits_data:    Dict,
+    ) -> Dict:
+        """
+        فتح صفقة Short كاملة — مرآة open_position.
+
+        الاختلافات عن Long:
+            1. أمر البيع بالسوق أولاً (open short = sell)
+            2. SL فوق الدخول (وقف الخسارة للـ Short)
+            3. TP1/TP2 تحت الدخول
+            4. الجهة المسجَّلة 'short'
+
+        Args:
+            signal_data:   ناتج strategy.check_short_signal()
+            position_data: ناتج risk_manager.calculate_position_size(side='short')
+            exits_data:    ناتج risk_manager.calculate_short_stops()
+        """
+        if symbol in self.open_positions:
+            msg = f"⚠️ صفقة مفتوحة مسبقاً على {symbol} — يُرفض الفتح"
+            logger.warning(msg)
+            return {'success': False, 'error': msg}
+
+        if not exits_data.get('valid', False):
+            msg = f"❌ exits_data Short غير صالحة (R:R={exits_data.get('risk_reward_ratio',0):.2f})"
+            logger.error(msg)
+            return {'success': False, 'error': msg}
+
+        entry_price   = float(signal_data.get('entry_price', 0))
+        contract_size = float(position_data.get('contract_size', 0))
+        leverage      = int(float(position_data.get('leverage', 1)))
+        sl_price      = float(exits_data['stop_loss'])
+        tp1_price     = float(exits_data['take_profit_1'])
+        tp2_price     = float(exits_data['take_profit_2'])
+
+        # تحقق سريع من علاقة المستويات (SL فوق، TP تحت)
+        valid_stops, stop_reason = self.risk_manager.validate_short_stops(
+            entry_price, sl_price, tp1_price, tp2_price
+        )
+        if not valid_stops:
+            logger.error(f"❌ مستويات Short غير صالحة: {stop_reason}")
+            return {'success': False, 'error': stop_reason}
+
+        if entry_price <= 0 or contract_size <= 0:
+            msg = f"❌ بيانات الصفقة غير صالحة: entry={entry_price} | size={contract_size}"
+            logger.error(msg)
+            return {'success': False, 'error': msg}
+
+        orders_placed: Dict[str, Dict] = {}
+        market_order = None
+
+        try:
+            self._setup_leverage_and_margin(symbol, leverage)
+
+            # ── أمر البيع بالسوق (فتح Short) ─────────────
+            logger.info(
+                f"📤 فتح SHORT | {symbol} | "
+                f"${entry_price:,.2f} × {contract_size:.6f} | Lev={leverage}x"
+            )
+            market_order = self._execute_with_retry(
+                fn          = lambda: self.exchange.create_market_order(
+                    symbol, 'sell', contract_size
+                ),
+                description = f"Market SELL (open short) {symbol}",
+                critical    = True,
+            )
+            if not market_order:
+                return {'success': False, 'error': 'فشل أمر البيع الرئيسي (Short)'}
+
+            orders_placed['market'] = market_order
+            fill_price = float(market_order.get('price', entry_price))
+
+            # ── Stop Loss (فوق الدخول) ──────────────────
+            sl_order = self._place_stop_loss(symbol, sl_price, contract_size, side='short')
+            if sl_order:
+                orders_placed['stop_loss'] = sl_order
+
+            # ── Take Profit 1 (50%) — تحت الدخول ────────
+            size_tp1  = round(contract_size * 0.5, 6)
+            tp1_order = self._place_take_profit(
+                symbol, tp1_price, size_tp1, label='TP1', side='short'
+            )
+            if tp1_order:
+                orders_placed['take_profit_1'] = tp1_order
+
+            # ── Take Profit 2 (50% المتبقي) ─────────────
+            size_tp2  = contract_size - size_tp1
+            tp2_order = self._place_take_profit(
+                symbol, tp2_price, size_tp2, label='TP2', side='short'
+            )
+            if tp2_order:
+                orders_placed['take_profit_2'] = tp2_order
+
+            # ── تسجيل الصفقة ────────────────────────────
+            position_state = {
+                'symbol':        symbol,
+                'side':          'short',
+                'entry_price':   fill_price,
+                'contract_size': contract_size,
+                'leverage':      leverage,
+                'stop_loss':     sl_price,
+                'take_profit_1': tp1_price,
+                'take_profit_2': tp2_price,
+                'sl_moved_to_be': False,
+                'tp1_hit':       False,
+                'signal_score':  signal_data.get('score', 0),
+                'rr_ratio':      exits_data.get('risk_reward_ratio', 0),
+                'opened_at':     datetime.utcnow().isoformat(),
+                'order_ids':     {k: v.get('id', '') for k, v in orders_placed.items()},
+            }
+
+            self.open_positions[symbol]  = position_state
+            self.pending_orders[symbol]  = {
+                'sl_order_id':  sl_order.get('id',  '') if sl_order  else '',
+                'tp1_order_id': tp1_order.get('id', '') if tp1_order else '',
+                'tp2_order_id': tp2_order.get('id', '') if tp2_order else '',
+            }
+
+            logger.trade_entry(
+                symbol    = symbol,
+                direction = 'short',
+                price     = fill_price,
+                qty       = contract_size,
+                leverage  = leverage,
+                tp1       = tp1_price,
+                tp2       = tp2_price,
+                sl        = sl_price,
+            )
+
+            return {
+                'success':  True,
+                'position': position_state,
+                'orders':   orders_placed,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في open_short_position ({symbol}): {e}")
+            if market_order:
+                logger.warning(
+                    f"⚠️ تنفيذ إغلاق طارئ لـ {symbol} بسبب فشل وضع SL/TP (Short)"
+                )
+                self._emergency_close_single(symbol, contract_size, side='short')
+            return {'success': False, 'error': str(e)}
+
+    # ═══════════════════════════════════════════════════
     # إغلاق الصفقات
     # ═══════════════════════════════════════════════════
 
@@ -316,12 +467,13 @@ class OrderManager:
             # ── إلغاء الأوامر المعلقة أولاً ──────────────
             self.cancel_all_orders(symbol)
 
-            # ── أمر الإغلاق ─────────────────────────────
+            # ── أمر الإغلاق (الجهة تتبع اتجاه الصفقة: long→sell, short→buy) ──
+            close_side = self._closing_side(position['side'])
             close_order = self._execute_with_retry(
                 fn          = lambda: self.exchange.create_market_order(
-                    symbol, 'sell', size_to_close
+                    symbol, close_side, size_to_close
                 ),
-                description = f"Market SELL {symbol} ({reason})",
+                description = f"Market {close_side.upper()} {symbol} ({reason})",
                 critical    = True,
             )
 
@@ -522,14 +674,25 @@ class OrderManager:
                 tp1 = pos.get('take_profit_1', 0)
                 tp2 = pos.get('take_profit_2', 0)
 
+                is_short = pos.get('side') == 'short'
                 reason = None
 
-                if sl  and current_price <= sl:
-                    reason = 'STOP_LOSS'
-                elif tp2 and current_price >= tp2:
-                    reason = 'TAKE_PROFIT_2'
-                elif tp1 and current_price >= tp1 and not pos.get('tp1_hit', False):
-                    reason = 'TAKE_PROFIT_1'
+                if is_short:
+                    # Short: SL فوق الدخول، TP تحت الدخول
+                    if sl  and current_price >= sl:
+                        reason = 'STOP_LOSS'
+                    elif tp2 and current_price <= tp2:
+                        reason = 'TAKE_PROFIT_2'
+                    elif tp1 and current_price <= tp1 and not pos.get('tp1_hit', False):
+                        reason = 'TAKE_PROFIT_1'
+                else:
+                    # Long: SL تحت الدخول، TP فوق الدخول
+                    if sl  and current_price <= sl:
+                        reason = 'STOP_LOSS'
+                    elif tp2 and current_price >= tp2:
+                        reason = 'TAKE_PROFIT_2'
+                    elif tp1 and current_price >= tp1 and not pos.get('tp1_hit', False):
+                        reason = 'TAKE_PROFIT_1'
 
                 if reason == 'TAKE_PROFIT_1':
                     # إغلاق جزئي (50%) عند TP1
@@ -580,12 +743,22 @@ class OrderManager:
             ticker        = self.exchange.fetch_ticker(symbol)
             current_price = float(ticker.get('close', 0))
 
-            should_move, new_sl = self.risk_manager.should_move_sl_to_breakeven(
-                current_price = current_price,
-                entry_price   = pos['entry_price'],
-                take_profit_1 = pos['take_profit_1'],
-                current_sl    = pos['stop_loss'],
-            )
+            is_short = pos.get('side') == 'short'
+
+            if is_short:
+                should_move, new_sl = self.risk_manager.should_move_sl_to_breakeven_short(
+                    current_price = current_price,
+                    entry_price   = pos['entry_price'],
+                    take_profit_1 = pos['take_profit_1'],
+                    current_sl    = pos['stop_loss'],
+                )
+            else:
+                should_move, new_sl = self.risk_manager.should_move_sl_to_breakeven(
+                    current_price = current_price,
+                    entry_price   = pos['entry_price'],
+                    take_profit_1 = pos['take_profit_1'],
+                    current_sl    = pos['stop_loss'],
+                )
 
             if should_move and new_sl:
                 self.open_positions[symbol]['stop_loss']     = new_sl
@@ -599,18 +772,28 @@ class OrderManager:
     # وضع/تحديث/إلغاء الأوامر
     # ═══════════════════════════════════════════════════
 
+    @staticmethod
+    def _closing_side(side: str) -> str:
+        """
+        جهة الإغلاق حسب اتجاه الصفقة:
+            long  → 'sell' (نبيع لنغلق صفقة شراء)
+            short → 'buy'  (نشتري لنغلق صفقة بيع)
+        """
+        return 'buy' if side == 'short' else 'sell'
+
     def _place_stop_loss(
         self,
         symbol:    str,
         sl_price:  float,
         amount:    float,
+        side:      str   = 'long',
     ) -> Optional[Dict]:
-        """وضع أمر Stop Loss مع retry."""
+        """وضع أمر Stop Loss مع retry — جهة الأمر تتبع اتجاه الصفقة."""
         return self._execute_with_retry(
             fn = lambda: self.exchange.create_stop_loss_order(
-                symbol, 'sell', amount, sl_price
+                symbol, self._closing_side(side), amount, sl_price
             ),
-            description = f"SL @ ${sl_price:,.2f}",
+            description = f"SL @ ${sl_price:,.2f} ({side})",
             critical    = False,   # غير حرج — الصفقة مفتوحة بالفعل
         )
 
@@ -620,13 +803,14 @@ class OrderManager:
         tp_price: float,
         amount:   float,
         label:    str = 'TP',
+        side:     str = 'long',
     ) -> Optional[Dict]:
-        """وضع أمر Take Profit مع retry."""
+        """وضع أمر Take Profit مع retry — جهة الأمر تتبع اتجاه الصفقة."""
         return self._execute_with_retry(
             fn = lambda: self.exchange.create_take_profit_order(
-                symbol, 'sell', amount, tp_price
+                symbol, self._closing_side(side), amount, tp_price
             ),
-            description = f"{label} @ ${tp_price:,.2f}",
+            description = f"{label} @ ${tp_price:,.2f} ({side})",
             critical    = False,
         )
 
@@ -650,8 +834,11 @@ class OrderManager:
             # وضع الأمر الجديد
             pos = self.open_positions.get(symbol, {})
             remaining_size = pos.get('contract_size', 0)
+            pos_side = pos.get('side', 'long')
 
-            new_sl_order = self._place_stop_loss(symbol, new_sl_price, remaining_size)
+            new_sl_order = self._place_stop_loss(
+                symbol, new_sl_price, remaining_size, side=pos_side
+            )
             if new_sl_order and symbol in self.pending_orders:
                 self.pending_orders[symbol]['sl_order_id'] = new_sl_order.get('id', '')
                 logger.info(
@@ -736,11 +923,15 @@ class OrderManager:
 
         return results
 
-    def _emergency_close_single(self, symbol: str, contract_size: float):
+    def _emergency_close_single(
+        self, symbol: str, contract_size: float, side: str = 'long'
+    ):
         """إغلاق طارئ فوري لصفقة واحدة (يُستخدم عند فشل وضع SL/TP)."""
         try:
-            self.exchange.create_market_order(symbol, 'sell', contract_size)
-            logger.warning(f"🚨 إغلاق طارئ نجح | {symbol}")
+            self.exchange.create_market_order(
+                symbol, self._closing_side(side), contract_size
+            )
+            logger.warning(f"🚨 إغلاق طارئ نجح | {symbol} ({side})")
         except Exception as e:
             logger.critical(
                 f"🚨 إغلاق طارئ فشل! | {symbol} | {e}\n"

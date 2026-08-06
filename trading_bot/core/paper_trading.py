@@ -254,8 +254,14 @@ class PaperTradingExchange:
         order_id = self._generate_order_id()
         timestamp = int(datetime.utcnow().timestamp() * 1000)
 
-        # ── فتح صفقة (LONG) ─────────────────────────
-        if side == 'buy':
+        existing = self._positions.get(symbol)
+
+        # ═══════════════════════════════════════════════
+        # فتح صفقة جديدة (لا توجد صفقة على هذا الرمز بعد)
+        # ═══════════════════════════════════════════════
+        if existing is None:
+            side_label = 'long' if side == 'buy' else 'short'
+
             # الهامش = Notional / Leverage (نستخدم 10x كافتراضي)
             margin = notional / self.MAX_LEVERAGE
 
@@ -270,10 +276,10 @@ class PaperTradingExchange:
             # حجز الهامش والرسوم من الرصيد
             self._usdt_balance -= (margin + fee)
 
-            # تسجيل الصفقة المفتوحة
+            # تسجيل الصفقة المفتوحة (بالاتجاه الصحيح)
             self._positions[symbol] = {
                 'symbol':        symbol,
-                'side':          'long',
+                'side':          side_label,
                 'entry_price':   fill_price,
                 'amount':        amount,
                 'contracts':     amount,
@@ -288,28 +294,40 @@ class PaperTradingExchange:
                 'opened_at':     datetime.utcnow().isoformat(),
             }
 
+            emoji = '🟢' if side_label == 'long' else '🔴'
             logger.info(
-                f"🟢 [Paper] فتح LONG | {symbol} | "
+                f"{emoji} [Paper] فتح {side_label.upper()} | {symbol} | "
                 f"السعر: ${fill_price:,.2f} | "
                 f"الكمية: {amount:.4f} | "
                 f"الهامش: ${margin:,.2f} | "
                 f"الرسوم: ${fee:.2f}"
             )
 
-        # ── إغلاق صفقة (LONG) ───────────────────────
-        elif side == 'sell':
-            pos = self._positions.pop(symbol, None)
-
-            if not pos:
+        # ═══════════════════════════════════════════════
+        # إغلاق صفقة قائمة (الجهة يجب أن تطابق الاتجاه)
+        # ═══════════════════════════════════════════════
+        else:
+            # long → نغلق بـ sell، short → نغلق بـ buy
+            closing_ok = (
+                (existing['side'] == 'long'  and side == 'sell') or
+                (existing['side'] == 'short' and side == 'buy')
+            )
+            if not closing_ok:
                 logger.warning(
-                    f"⚠️ [Paper] لا توجد صفقة مفتوحة لـ {symbol}"
+                    f"⚠️ [Paper] جهة إغلاق خاطئة لصفقة {existing['side']} "
+                    f"على {symbol} (الأمر: {side}) — تجاهل"
                 )
                 return {}
 
-            # حساب الربح والخسارة
+            pos = self._positions.pop(symbol, None)
+
+            # حساب الربح/الخسارة حسب الاتجاه
             exit_fee = self._calculate_fee(fill_price * amount)
-            raw_pnl  = (fill_price - pos['entry_price']) * amount
-            net_pnl  = raw_pnl - exit_fee
+            if pos['side'] == 'long':
+                raw_pnl = (fill_price - pos['entry_price']) * amount
+            else:  # short
+                raw_pnl = (pos['entry_price'] - fill_price) * amount
+            net_pnl = raw_pnl - exit_fee
 
             # استرداد الهامش + PnL
             self._usdt_balance += pos['margin_locked'] + net_pnl
@@ -328,7 +346,7 @@ class PaperTradingExchange:
             self.trade_history.append(record)
 
             logger.trade_exit(
-                symbol, 'long',
+                symbol, pos['side'],
                 pos['entry_price'], fill_price,
                 net_pnl, pnl_pct,
                 'PAPER_MARKET'
@@ -447,20 +465,23 @@ class PaperTradingExchange:
         symbol: str,
         position_side: str = None
     ) -> Dict:
-        """إغلاق صفقة بالكامل بأمر سوق"""
+        """إغلاق صفقة بالكامل بأمر سوق (الجهة تتبع الاتجاه)"""
         pos = self._positions.get(symbol)
         if not pos:
             logger.warning(
                 f"⚠️ [Paper] لا توجد صفقة مفتوحة لـ {symbol}"
             )
             return {}
-        return self.create_market_order(symbol, 'sell', pos['amount'])
+        close_side = 'buy' if pos.get('side') == 'short' else 'sell'
+        return self.create_market_order(symbol, close_side, pos['amount'])
 
     def _get_unrealized_pnl(self, pos: dict) -> float:
-        """حساب الربح/الخسارة غير المحقق للصفقة المفتوحة"""
+        """حساب الربح/الخسارة غير المحقق للصفقة المفتوحة (حسب الاتجاه)"""
         try:
             ticker = self.fetch_ticker(pos['symbol'])
             current_price = ticker.get('close', pos['entry_price'])
+            if pos.get('side') == 'short':
+                return (pos['entry_price'] - current_price) * pos['amount']
             return (current_price - pos['entry_price']) * pos['amount']
         except Exception:
             return 0.0
@@ -498,24 +519,37 @@ class PaperTradingExchange:
                 sl  = pos.get('stop_loss')
                 tp1 = pos.get('take_profit_1')
                 tp2 = pos.get('take_profit_2')
+                is_short = pos.get('side') == 'short'
 
                 reason = None
 
-                # تحقق من شروط الخروج بالأولوية
-                if sl and current_price <= sl:
-                    reason = 'STOP_LOSS'
-                elif tp2 and current_price >= tp2:
-                    reason = 'TAKE_PROFIT_2'
-                elif tp1 and current_price >= tp1:
-                    reason = 'TAKE_PROFIT_1'
+                # تحقق من شروط الخروج بالأولوية (حسب الاتجاه)
+                if is_short:
+                    # Short: SL فوق الدخول، TP تحت الدخول
+                    if sl and current_price >= sl:
+                        reason = 'STOP_LOSS'
+                    elif tp2 and current_price <= tp2:
+                        reason = 'TAKE_PROFIT_2'
+                    elif tp1 and current_price <= tp1:
+                        reason = 'TAKE_PROFIT_1'
+                else:
+                    # Long: SL تحت الدخول، TP فوق الدخول
+                    if sl and current_price <= sl:
+                        reason = 'STOP_LOSS'
+                    elif tp2 and current_price >= tp2:
+                        reason = 'TAKE_PROFIT_2'
+                    elif tp1 and current_price >= tp1:
+                        reason = 'TAKE_PROFIT_1'
 
                 if reason:
                     logger.info(
                         f"🔔 [Paper] {reason} تفعَّل! | "
                         f"{symbol} | السعر: ${current_price:,.2f}"
                     )
+                    # جهة الإغلاق تتبع اتجاه الصفقة
+                    close_side = 'buy' if is_short else 'sell'
                     order = self.create_market_order(
-                        symbol, 'sell', pos['amount']
+                        symbol, close_side, pos['amount']
                     )
                     triggered.append({
                         'symbol': symbol,

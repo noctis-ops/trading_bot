@@ -17,7 +17,7 @@ trading:
   trend_timeframe: '1h'
   confirmation_timeframe: '5m'
   lookback_period: 300
-  max_concurrent_positions: 1
+  max_concurrent_positions: 3
   check_interval_seconds: 60
 
 risk_management:

@@ -43,9 +43,25 @@
       مستوى البوت — للاستخدام اليدوي أو من Telegram لاحقاً.
     - عدّاد أخطاء متتالية (MAX_CONSECUTIVE_TICK_ERRORS) يوقف البوت
       احترازياً إذا تكرر الفشل، بدل الدوران في حلقة أخطاء لا نهائية.
-    - لا persistence بعد (database في Phase 5) — أي إعادة تشغيل تُصفّر
-      حالة PaperTradingExchange بالكامل لأنها في الذاكرة فقط. هذا متوقّع
-      ومتوافق مع ترتيب خارطة الطريق في BOT_STATUS_REPORT.md.
+
+قاعدة البيانات (Phase 5.2 — مربوطة الآن):
+    TradeLogger (database/trade_logger.py) يُنشَأ كأحد مكوّنات TradingBot
+    بنفس نمط الحقن (DI) المستخدم لبقية المكونات، ويُستدعى من ثلاث نقاط
+    فقط في دورة حياة البوت:
+        ① _scan_symbol_for_entry() → log_signal() فور حساب breakdown
+           (كل إشارة تُحلَّل تُسجَّل، سواء أدّت لصفقة أم رُفضت — راجع
+           docstring trade_logger.py لسبب هذا التصميم)
+        ② _sync_trade_log()        → log_trade() لأي صفقة أُضيفت حديثاً
+           إلى order_manager.closed_positions، تُستدعى من _run_single_tick()
+           بعد check_and_update_positions() ومن emergency_stop()
+        ③ _heartbeat_if_due()      → update_daily_performance() ضمن نفس
+           فحص RISK_SUMMARY_INTERVAL_SECONDS الساعي (نفس المدخلات تقريباً)
+    close_db() يُستدعى مرة واحدة في _shutdown() — تماماً كما وثّقته
+    database/models.py::close_db() في docstring الخاص بها مسبقاً.
+    ملاحظة: order_manager.py لم يُعدَّل إطلاقاً لإنجاز هذا الربط — بدل
+    تغيير عقد check_and_update_positions() ليُعيد closed_record الكامل،
+    TradingBot يتتبّع طول order_manager.closed_positions بنفسه
+    (self._logged_closed_positions_count) ويُسجِّل فقط العناصر الجديدة.
 
 ملاحظة مهمة عن كشف الشمعة الجديدة:
     data.market_data.MarketData.is_new_candle() لا يحتفظ بأي حالة بين
@@ -71,6 +87,8 @@ from data.market_data import MarketData
 from core.strategy import TradingStrategy
 from core.risk_manager import RiskManager
 from core.order_manager import OrderManager
+from database.trade_logger import TradeLogger
+from database.models import close_db
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -138,20 +156,24 @@ class TradingBot:
         strategy      = None,
         risk_manager  = None,
         order_manager = None,
+        trade_logger  = None,
     ):
         """
         تهيئة TradingBot.
 
         Args:
-            exchange, market_data, strategy, risk_manager, order_manager:
+            exchange, market_data, strategy, risk_manager, order_manager,
+            trade_logger:
                 معاملات اختيارية لحقن التبعيات (Dependency Injection).
-                تُستخدم فقط للاختبار الآلي (test_bot.py — Phase 4.7) لحقن
-                mocks أو مكونات مُعدَّة مسبقاً. التشغيل الطبيعي عبر main.py
-                يستدعي TradingBot() بدون أي معطيات، فتُبنى كل المكونات
-                تلقائياً بنفس سلسلة __main__ الموجودة في order_manager.py:
+                تُستخدم فقط للاختبار الآلي (test_bot.py — Phase 4.7/5.2)
+                لحقن mocks أو مكونات مُعدَّة مسبقاً. التشغيل الطبيعي عبر
+                main.py يستدعي TradingBot() بدون أي معطيات، فتُبنى كل
+                المكونات تلقائياً بنفس سلسلة __main__ الموجودة في
+                order_manager.py، مع TradeLogger كخطوة أخيرة:
                     exchange = create_exchange()
                     rm = RiskManager(initial_balance=10000)
                     om = OrderManager(exchange, rm)
+                    tl = TradeLogger(); tl.ensure_db_ready()
         """
         if not self.SYMBOLS:
             raise ValueError(
@@ -173,6 +195,17 @@ class TradingBot:
 
         self.order_manager = order_manager or OrderManager(self.exchange, self.risk_manager)
 
+        self.trade_logger = trade_logger or TradeLogger()
+        self.trade_logger.ensure_db_ready()
+
+        # ── تسمية البيئة لتسجيل الصفقات (paper|live) ─────────
+        # نفس فحص hasattr المستخدم في OrderManager._is_paper وfي
+        # test_bot.py::test_order_manager() — بدل الوصول لسمة داخلية
+        # (_is_paper) في كائن OrderManager من خارج نطاقه.
+        self._environment_label = (
+            'paper' if hasattr(self.exchange, 'check_and_trigger_orders') else 'live'
+        )
+
         # ── حالة التشغيل ──────────────────────────────────
         self.is_running: bool           = False
         self.start_time: Optional[datetime] = None
@@ -182,6 +215,12 @@ class TradingBot:
         # راجع الملاحظة أعلى الملف — MarketData.is_new_candle() لا يحتفظ
         # بحالة بين الاستدعاءات، لذا نتتبّعها هنا بأنفسنا.
         self._last_candle_time: Dict[str, pd.Timestamp] = {}
+
+        # ── تتبّع الصفقات المُسجَّلة في قاعدة البيانات ─────────
+        # عدد عناصر order_manager.closed_positions التي سُجِّلت بالفعل
+        # عبر trade_logger.log_trade() — يُستخدم في _sync_trade_log()
+        # بدل تعديل عقد OrderManager نفسه (راجع الملاحظة أعلى الملف)
+        self._logged_closed_positions_count: int = 0
 
         # ── توقيت النبضات الدورية ────────────────────────
         self._last_heartbeat_at:    float = 0.0
@@ -258,6 +297,9 @@ class TradingBot:
             #    تلقائياً عبر risk_manager.register_trade_result()
             self.order_manager.check_and_update_positions()
 
+            # 1.5) تسجيل أي صفقة أُغلقت للتو في قاعدة البيانات (Phase 5.2)
+            self._sync_trade_log()
+
             # 2) البحث عن دخول جديد فقط إذا لم نصل الحد الأقصى العام
             if self.order_manager.get_open_positions_count() < self.MAX_CONCURRENT_POSITIONS:
                 self._scan_for_entries()
@@ -331,6 +373,12 @@ class TradingBot:
 
             # ── التقرير الشامل: gates + validate_signal + score + MTF ──
             breakdown = self.strategy.get_signal_breakdown(df_1h, df_main, df_5m)
+
+            # ── تسجيل كل إشارة تُحلَّل — نُفِّذت أم رُفضت (Phase 5.2) ──
+            # يُستدعى هنا تحديداً (بعد breakdown مباشرة، قبل فحص
+            # should_trade) حتى تُسجَّل الإشارات المرفوضة أيضاً — راجع
+            # docstring database/trade_logger.py::log_signal()
+            self.trade_logger.log_signal(symbol, breakdown)
 
             if not breakdown.get('should_trade', False):
                 logger.debug(
@@ -426,6 +474,43 @@ class TradingBot:
         return True
 
     # ═══════════════════════════════════════════════════
+    # مزامنة سجل الصفقات مع قاعدة البيانات (Phase 5.2)
+    # ═══════════════════════════════════════════════════
+
+    def _sync_trade_log(self):
+        """
+        تسجيل أي صفقة أُضيفت حديثاً إلى order_manager.closed_positions
+        في قاعدة البيانات عبر trade_logger.log_trade().
+
+        لماذا هكذا (بدل تعديل order_manager.py):
+        ─────────────────────────────────────────
+        OrderManager.check_and_update_positions() يُعيد فقط ملخصاً مختصراً
+        ({symbol, reason, pnl}) لكل صفقة أُغلقت في الدورة الحالية — وليس
+        closed_record الكامل الذي يحتاجه log_trade() (entry_price،
+        exit_price، contract_size، stop_loss...). closed_positions نفسها
+        تحتوي على closed_record الكامل، وتتزايد فقط (لا تُحذَف عناصر
+        منها أبداً)، لذا التتبّع البسيط لطولها (_logged_closed_positions_count)
+        يكفي لمعرفة أي العناصر جديدة دون أي تعديل على عقد OrderManager
+        العام أو على order_manager.py على الإطلاق.
+
+        تُستدعى من:
+            • _run_single_tick() — بعد check_and_update_positions() في كل دورة
+            • emergency_stop()   — بعد emergency_close_all()
+            • _shutdown()        — لضمان تسجيل آخر دورة قبل التوقف
+        """
+        closed      = self.order_manager.closed_positions
+        new_records = closed[self._logged_closed_positions_count:]
+
+        for record in new_records:
+            self.trade_logger.log_trade(
+                symbol        = record['symbol'],
+                closed_record = record,
+                environment   = self._environment_label,
+            )
+
+        self._logged_closed_positions_count = len(closed)
+
+    # ═══════════════════════════════════════════════════
     # النبضات الدورية (Heartbeat) — حالة + ملخصات
     # ═══════════════════════════════════════════════════
 
@@ -449,9 +534,18 @@ class TradingBot:
             self._last_heartbeat_at = now
 
         if now - self._last_risk_summary_at >= self.RISK_SUMMARY_INTERVAL_SECONDS:
-            self.risk_manager.print_risk_summary(
-                current_balance=self.exchange.get_available_balance()
+            balance = self.exchange.get_available_balance()
+            self.risk_manager.print_risk_summary(current_balance=balance)
+
+            # تحديث لقطة أداء اليوم في قاعدة البيانات (Phase 5.2) — نفس
+            # الدورة الساعية لأنها تحتاج نفس المدخلات تقريباً (رصيد حالي +
+            # ملخصا RiskManager وOrderManager)، بدل إضافة ثابت فاصل جديد
+            self.trade_logger.update_daily_performance(
+                current_balance = balance,
+                risk_summary    = self.risk_manager.get_risk_summary(current_balance=balance),
+                session_summary = self.order_manager.get_session_summary(),
             )
+
             self._last_risk_summary_at = now
 
     def _get_uptime_str(self) -> str:
@@ -512,13 +606,24 @@ class TradingBot:
                 f"راجعها يدوياً قبل إعادة التشغيل إن لزم."
             )
 
+        # ── مزامنة أخيرة قبل التوقف (Phase 5.2) ───────────────
+        self._sync_trade_log()
+        balance = self.exchange.get_available_balance()
+        self.trade_logger.update_daily_performance(
+            current_balance = balance,
+            risk_summary    = self.risk_manager.get_risk_summary(current_balance=balance),
+            session_summary = self.order_manager.get_session_summary(),
+        )
+
         print("\n" + "═" * 70)
         print(f"📊 ملخص الجلسة | مدة التشغيل: {self._get_uptime_str()}")
         print("═" * 70)
         self.order_manager.print_session_summary()
-        self.risk_manager.print_risk_summary(
-            current_balance=self.exchange.get_available_balance()
-        )
+        self.risk_manager.print_risk_summary(current_balance=balance)
+
+        # ── إغلاق اتصال قاعدة البيانات — راجع
+        # database/models.py::close_db() التي توثّق هذه النقطة بالضبط
+        close_db()
 
         logger.info("👋 TradingBot توقف بأمان")
 
@@ -546,6 +651,7 @@ class TradingBot:
         """
         logger.warning(f"🚨 EMERGENCY STOP طُلب | السبب: {reason}")
         self.order_manager.emergency_close_all(reason=reason)
+        self._sync_trade_log()
         self.stop()
 
     # ═══════════════════════════════════════════════════

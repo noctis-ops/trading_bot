@@ -305,6 +305,7 @@ class PaperTradingExchange:
 
         # ═══════════════════════════════════════════════
         # إغلاق صفقة قائمة (الجهة يجب أن تطابق الاتجاه)
+        # يدعم الإغلاق الكامل والإغلاق الجزئي (مثل TP1 = 50%)
         # ═══════════════════════════════════════════════
         else:
             # long → نغلق بـ sell، short → نغلق بـ buy
@@ -319,29 +320,37 @@ class PaperTradingExchange:
                 )
                 return {}
 
-            pos = self._positions.pop(symbol, None)
+            pos = self._positions[symbol]
 
-            # حساب الربح/الخسارة حسب الاتجاه
-            exit_fee = self._calculate_fee(fill_price * amount)
+            # كمية الإغلاق الفعلية (لا تتجاوز حجم الصفقة)
+            close_amount = min(amount, pos['amount'])
+            is_full_close = close_amount >= pos['amount'] - 1e-9
+
+            # حساب الربح/الخسارة على الكمية المغلقة فقط
+            exit_fee = self._calculate_fee(fill_price * close_amount)
             if pos['side'] == 'long':
-                raw_pnl = (fill_price - pos['entry_price']) * amount
+                raw_pnl = (fill_price - pos['entry_price']) * close_amount
             else:  # short
-                raw_pnl = (pos['entry_price'] - fill_price) * amount
+                raw_pnl = (pos['entry_price'] - fill_price) * close_amount
             net_pnl = raw_pnl - exit_fee
 
-            # استرداد الهامش + PnL
-            self._usdt_balance += pos['margin_locked'] + net_pnl
+            # تحرير الهامش بنسبة الكمية المغلقة من إجمالي الصفقة
+            margin_ratio  = close_amount / pos['amount']
+            margin_release = pos['margin_locked'] * margin_ratio
+            self._usdt_balance += margin_release + net_pnl
 
-            pnl_pct = net_pnl / (pos['entry_price'] * amount) * 100
+            pnl_pct = net_pnl / (pos['entry_price'] * close_amount) * 100
 
-            # تسجيل في السجل التاريخي
+            # تسجيل في السجل التاريخي (لكل إغلاق جزئي سجل مستقل)
             record = {
                 **pos,
-                'exit_price':  fill_price,
-                'exit_fee':    exit_fee,
-                'pnl':         net_pnl,
-                'pnl_pct':     pnl_pct,
-                'closed_at':   datetime.utcnow().isoformat(),
+                'exit_price':     fill_price,
+                'exit_fee':       exit_fee,
+                'pnl':            net_pnl,
+                'pnl_pct':        pnl_pct,
+                'closed_at':      datetime.utcnow().isoformat(),
+                'closed_amount':  close_amount,
+                'is_partial':     not is_full_close,
             }
             self.trade_history.append(record)
 
@@ -351,6 +360,20 @@ class PaperTradingExchange:
                 net_pnl, pnl_pct,
                 'PAPER_MARKET'
             )
+
+            # ── الإغلاق الكامل: إزالة الصفقة ──────────
+            if is_full_close:
+                self._positions.pop(symbol, None)
+            # ── الإغلاق الجزئي: تصغير حجم الصفقة المتبقية ──
+            else:
+                pos['amount']        = round(pos['amount'] - close_amount, 8)
+                pos['contracts']     = pos['amount']
+                pos['notional']      = round(pos['notional'] * (1 - margin_ratio), 4)
+                pos['margin_locked'] = round(pos['margin_locked'] - margin_release, 4)
+                logger.info(
+                    f"➗ [Paper] إغلاق جزئي | {symbol} | "
+                    f"أُغلق {close_amount:.6f} | المتبقي {pos['amount']:.6f}"
+                )
 
         return {
             'id':        order_id,
@@ -548,9 +571,33 @@ class PaperTradingExchange:
                     )
                     # جهة الإغلاق تتبع اتجاه الصفقة
                     close_side = 'buy' if is_short else 'sell'
-                    order = self.create_market_order(
-                        symbol, close_side, pos['amount']
-                    )
+
+                    if reason == 'TAKE_PROFIT_1':
+                        # ══ إغلاق جزئي 50% + نقل SL إلى Breakeven ══
+                        # (يُطابق تصميم الاستراتيجية: 50% عند TP1 و50% عند TP2
+                        #  مع نقل SL إلى نقطة التعادل بعد TP1)
+                        half_size = round(pos['amount'] * 0.5, 6)
+                        order = self.create_market_order(
+                            symbol, close_side, half_size
+                        )
+
+                        # إذا أُغلقت النصف بنجاح وما زالت الصفقة موجودة
+                        # → انقل SL إلى نقطة التعادل (الدخول) للـ 50% المتبقية
+                        remaining = self._positions.get(symbol)
+                        if remaining:
+                            remaining['stop_loss']    = pos['entry_price']
+                            remaining['tp1_hit']      = True
+                            remaining['sl_moved_to_be'] = True
+                            logger.info(
+                                f"🔄 [Paper] Breakeven بعد TP1 | {symbol} | "
+                                f"SL الجديد = ${pos['entry_price']:,.2f}"
+                            )
+                    else:
+                        # SL / TP2 → إغلاق كامل للصفقة المتبقية
+                        order = self.create_market_order(
+                            symbol, close_side, pos['amount']
+                        )
+
                     triggered.append({
                         'symbol': symbol,
                         'reason': reason,

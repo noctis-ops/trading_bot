@@ -614,6 +614,59 @@ class OrderManager:
                 continue
 
             pos = self.open_positions[sym]
+
+            if reason == 'TAKE_PROFIT_1':
+                # ══ إغلاق جزئي 50% عند TP1 ══
+                # (يُطابق تصميم الاستراتيجية ويُوازي سلوك live: يُغلق 50%
+                #  ويُبقي 50% مع نقل SL إلى Breakeven)
+                half_size = round(pos['contract_size'] * 0.5, 6)
+                pnl, pnl_pct = self._calculate_pnl(
+                    entry_price   = pos['entry_price'],
+                    exit_price    = price,
+                    contract_size = half_size,
+                    side          = pos['side'],
+                )
+
+                self.risk_manager.register_trade_result(
+                    symbol    = sym,
+                    pnl       = pnl,
+                    pnl_pct   = pnl_pct,
+                    exit_type = reason,
+                    extra     = {
+                        'entry_price':   pos['entry_price'],
+                        'exit_price':    price,
+                        'contract_size': half_size,
+                    },
+                )
+
+                # سجل الإغلاق الجزئي
+                closed_record = {
+                    **pos,
+                    'exit_price':   price,
+                    'exit_reason':  reason,
+                    'pnl':          pnl,
+                    'pnl_pct':      pnl_pct,
+                    'closed_amount': half_size,
+                    'closed_at':    datetime.utcnow().isoformat(),
+                }
+                self.closed_positions.append(closed_record)
+
+                # تصغير الحجم المتبقي + نقل SL إلى Breakeven
+                remaining = round(pos['contract_size'] - half_size, 6)
+                if remaining <= 0:
+                    self.open_positions.pop(sym, None)
+                    self.pending_orders.pop(sym, None)
+                else:
+                    self.open_positions[sym]['contract_size']  = remaining
+                    self.open_positions[sym]['tp1_hit']        = True
+                    self.open_positions[sym]['stop_loss']      = pos['entry_price']
+                    self.open_positions[sym]['sl_moved_to_be'] = True
+
+                events.append({'symbol': sym, 'reason': reason, 'pnl': pnl})
+                logger.trade_exit(sym, pos['side'], pos['entry_price'], price, pnl, pnl_pct, reason)
+                continue
+
+            # ══ إغلاق كامل (SL / TP2) ══
             pnl, pnl_pct = self._calculate_pnl(
                 entry_price   = pos['entry_price'],
                 exit_price    = price,

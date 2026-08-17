@@ -467,14 +467,33 @@ def test_short_support():
     assert p['side'] == 'short' and p['stop_loss'] > p['entry_price']
     ok("open_short_position() تفتح صفقة Short بشكل صحيح ✓")
 
-    # نزول السعر → ربح في الـ Short
-    price['val'] = 96.0
+    # نزول السعر → TP1: إغلاق جزئي 50% + نقل SL إلى Breakeven
+    price['val'] = stops['take_profit_1']
     events = om.check_and_update_positions()
     reasons = [e['reason'] for e in events]
     assert 'TAKE_PROFIT_1' in reasons, f"يجب أن يُغلق على TP1: {reasons}"
-    assert not om.has_open_position('ETH/USDT'), "يجب أن تُغلق الصفقة"
+
+    # بعد TP1: يجب أن تبقى الصفقة مفتوحة (نصفها)، وSL عند Breakeven
+    st = om.get_position_state('ETH/USDT')
+    assert st is not None, "بعد TP1 يجب أن تبقى 50% من الصفقة مفتوحة"
+    assert abs(st['contract_size'] - pos_data['contract_size'] * 0.5) < 1e-6, \
+        "يجب أن يبقى 50% من الحجم بعد TP1"
+    assert abs(st['stop_loss'] - st['entry_price']) < 1e-6, \
+        "يجب أن يُنقل SL إلى Breakeven بعد TP1"
+    ok("TP1 يُغلق 50% فقط + ينقل SL إلى Breakeven (يعمل الإغلاق الجزئي) ✓")
+
+    # نزول السعر إلى SL (Breakeven) → يُغلق النصف المتبقي بربح ~0
+    price['val'] = st['stop_loss']
+    events2 = om.check_and_update_positions()
+    reasons2 = [e['reason'] for e in events2]
+    assert 'STOP_LOSS' in reasons2, f"يجب أن يُغلق المتبقي على SL(Breakeven): {reasons2}"
+    assert not om.has_open_position('ETH/USDT'), "بعد Breakeven يجب أن تُغلق الصفقة بالكامل"
+
+    # إجمالي PnL موجب (ربح النصف الأول عند TP1 + ~0 على النصف الثاني)
+    total_pnl = sum(r['pnl'] for r in om.closed_positions)
+    assert total_pnl > 0, "يجب أن يكون إجمالي PnL موجباً"
     assert ex.get_available_balance() > 10_000.0, "يجب أن يزيد الرصيد بعد ربح Short"
-    ok(f"إغلاق Short على ربح ({events[0]['reason']}) والرصيد زاد ✓")
+    ok(f"الإغلاق الجزئي + Breakeven يعملان | إجمالي PnL=${total_pnl:,.2f} ✓")
 
     return True
 

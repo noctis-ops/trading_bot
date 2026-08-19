@@ -38,6 +38,7 @@
 """
 
 import yaml
+import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -869,6 +870,118 @@ class RiskManager:
             return True, entry_price
 
         return False, None
+
+    def should_update_trailing_stop(
+        self,
+        current_price: float,
+        entry_price:   float,
+        current_sl:    float,
+        take_profit_1: float,
+        atr:           float = 0.0,
+        side:          str = 'long',
+        trail_atr_mult: float = 1.0,
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        نقل SL تتبعياً (Trailing Stop) بعد تجاوز TP1.
+
+        الفكرة (من سلوك خبير التداول):
+            بعد أن يحجز البوت ربح TP1 (50%) ويصبح SL عند Breakeven،
+            يبدأ SL بملاحقة السعر لأعلى (Long) أو لأسفل (Short) محتفظاً
+            بمسافة أمان = trail_atr_mult × ATR الحالي، حتى لا يضيع ربح
+            كبير إذا انعكس السوق.
+
+        المنطق:
+            Long:  new_sl = current_price - trail_atr_mult × ATR
+                   (لكن لا ننقله لأسفل — نرفعه فقط)
+            Short: new_sl = current_price + trail_atr_mult × ATR
+                   (لا ننقله لأعلى — ننزله فقط)
+
+        Args:
+            current_price:  السعر الحالي
+            entry_price:    سعر الدخول
+            current_sl:     مستوى SL الحالي
+            take_profit_1:  TP1 (يجب تجاوزه لتفعيل الـ Trailing)
+            atr:            قيمة ATR الحالية لمسافة الأمان
+            side:           'long' | 'short'
+            trail_atr_mult: مضاعف ATR لمسافة الـ Trailing
+
+        Returns:
+            (should_update, new_sl)
+        """
+        if atr <= 0:
+            return False, None
+
+        # يُفعَّل فقط بعد تجاوز TP1 فعلياً (تحرك السعر لصالحنا بعد TP1).
+        # نستخدم شرطاً صارماً: السعر يجب أن يتجاوز TP1 (وليس عند مستوى
+        # TP1 بالضبط في نفس لحظة التحقق) حتى لا يتداخل مع Breakeven.
+        if side == 'short':
+            # السعر نزل تحت TP1 (انتعاش هابط فعلي)
+            if current_price >= take_profit_1:
+                return False, None
+            # ننزل SL مع السعر لكن لا نرفعه (نحمي الربح الهابط)
+            new_sl = current_price + trail_atr_mult * atr
+            if new_sl < current_sl:
+                return True, round(new_sl, 4)
+        else:
+            # السعر صعد فوق TP1 (انتعاش صاعد فعلي)
+            if current_price <= take_profit_1:
+                return False, None
+            # نرفع SL مع السعر لكن لا ننزله (نحمي الربح الصاعد)
+            new_sl = current_price - trail_atr_mult * atr
+            if new_sl > current_sl:
+                return True, round(new_sl, 4)
+
+        return False, None
+
+    def should_exit_on_reversal(
+        self,
+        df_15m:      pd.DataFrame,
+        side:        str,
+        entry_price: float,
+    ) -> Tuple[bool, str]:
+        """
+        خروج مبكر عند انعكاس الاتجاه (كسر EMA21/EMA50 على 15M).
+
+        خبير التداول لا ينتظر SL/TP دائماً — إذا انعكس الاتجاه المعاكس
+        لإشارته، يخرج مبكراً لتقليل الخسارة أو حجز الربح.
+
+        المنطق:
+            Long:  إذا كسر السعر EMA21 (و EMA50) نزولاً → خروج مبكر
+            Short: إذا كسر السعر EMA21 (و EMA50) صعوداً → خروج مبكر
+
+        Args:
+            df_15m:      DataFrame 15M مع المؤشرات
+            side:        'long' | 'short'
+            entry_price: سعر الدخول
+
+        Returns:
+            (should_exit, reason)
+                reason: 'REVERSAL_EXIT' | ''
+        """
+        if df_15m is None or len(df_15m) < 2:
+            return False, ''
+
+        try:
+            last = df_15m.iloc[-2]
+            close   = float(last['close'])
+            ema21   = float(last.get('ema_medium', close))
+            ema50   = float(last.get('ema_fast',   close))
+
+            if side == 'long':
+                # كسر EMA21 و EMA50 نزولاً = انعكاس هبوطي
+                if close < ema21 and close < ema50 and ema21 < ema50:
+                    # فقط إذا كان السعر تحت الدخول (نتجنب الخروج السابق لأوانه)
+                    if close < entry_price:
+                        return True, 'REVERSAL_EXIT'
+            else:
+                # كسر EMA21 و EMA50 صعوداً = انعكاس صعودي
+                if close > ema21 and close > ema50 and ema21 > ema50:
+                    if close > entry_price:
+                        return True, 'REVERSAL_EXIT'
+        except Exception as e:
+            logger.debug(f"⚠️ خطأ في should_exit_on_reversal: {e}")
+
+        return False, ''
 
     def should_close_losing_early(
         self,

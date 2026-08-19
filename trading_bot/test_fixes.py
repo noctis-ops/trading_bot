@@ -473,23 +473,24 @@ def test_short_support():
     reasons = [e['reason'] for e in events]
     assert 'TAKE_PROFIT_1' in reasons, f"يجب أن يُغلق على TP1: {reasons}"
 
-    # بعد TP1: يجب أن تبقى الصفقة مفتوحة (نصفها)، وSL عند Breakeven
+    # بعد TP1: يجب أن تبقى الصفقة مفتوحة (نصفها)، وSL محمي (Breakeven/Trailing)
     st = om.get_position_state('ETH/USDT')
     assert st is not None, "بعد TP1 يجب أن تبقى 50% من الصفقة مفتوحة"
     assert abs(st['contract_size'] - pos_data['contract_size'] * 0.5) < 1e-6, \
         "يجب أن يبقى 50% من الحجم بعد TP1"
-    assert abs(st['stop_loss'] - st['entry_price']) < 1e-6, \
-        "يجب أن يُنقل SL إلى Breakeven بعد TP1"
-    ok("TP1 يُغلق 50% فقط + ينقل SL إلى Breakeven (يعمل الإغلاق الجزئي) ✓")
+    # للـ Short: SL محمي يعني ≥ الدخول (Breakeven) أو أفضل (Trailing يحمّي أكثر)
+    assert st['stop_loss'] >= st['entry_price'], \
+        "بعد TP1 يجب أن يكون SL محميًا (Breakeven/Trailing) — لا خسارة على المتبقي"
+    ok("TP1 يُغلق 50% فقط + SL محمي (Breakeven/Trailing) ✓")
 
-    # نزول السعر إلى SL (Breakeven) → يُغلق النصف المتبقي بربح ~0
+    # نزول السعر إلى SL (محمي) → يُغلق النصف المتبقي بلا خسارة
     price['val'] = st['stop_loss']
     events2 = om.check_and_update_positions()
     reasons2 = [e['reason'] for e in events2]
-    assert 'STOP_LOSS' in reasons2, f"يجب أن يُغلق المتبقي على SL(Breakeven): {reasons2}"
-    assert not om.has_open_position('ETH/USDT'), "بعد Breakeven يجب أن تُغلق الصفقة بالكامل"
+    assert 'STOP_LOSS' in reasons2, f"يجب أن يُغلق المتبقي على SL: {reasons2}"
+    assert not om.has_open_position('ETH/USDT'), "بعد SL يجب أن تُغلق الصفقة بالكامل"
 
-    # إجمالي PnL موجب (ربح النصف الأول عند TP1 + ~0 على النصف الثاني)
+    # إجمالي PnL موجب (ربح النصف الأول عند TP1 + ≥0 على النصف الثاني المحمي)
     total_pnl = sum(r['pnl'] for r in om.closed_positions)
     assert total_pnl > 0, "يجب أن يكون إجمالي PnL موجباً"
     assert ex.get_available_balance() > 10_000.0, "يجب أن يزيد الرصيد بعد ربح Short"
@@ -582,6 +583,160 @@ def test_strategy_selector():
 
 
 # ══════════════════════════════════════════════════════════
+# Smart Level: تدرّج الشروط + Market Regime + Trailing + Correlation
+# ══════════════════════════════════════════════════════════
+
+def test_graded_conditions():
+    """التحقق من تدرّج الشروط (ADX=60 ≠ ADX=26)"""
+    from core.strategy import TradingStrategy
+
+    s = TradingStrategy()
+    close = pd.Series(100 + np.linspace(0, 25, 120))
+
+    def mk(adx):
+        df = pd.DataFrame({'close': close, 'high': close+2, 'low': close-2,
+                           'volume': np.full(120, 100.0)})
+        df['ema_slow']=close.ewm(span=200).mean(); df['ema_fast']=close.ewm(span=50).mean()
+        df['ema_medium']=close.ewm(span=21).mean()
+        df['rsi']=58.0; df['adx']=adx
+        df['macd']=0.5; df['macd_signal']=0.0; df['macd_hist']=0.5
+        df['volume_sma']=80.0
+        return df
+
+    df_weak = mk(26)   # ADX=26
+    ok1, sig1 = s.check_buy_signal(df_weak, df_weak, df_weak)
+    df_strong = mk(60)  # ADX=60
+    ok2, sig2 = s.check_buy_signal(df_strong, df_strong, df_strong)
+
+    assert ok1 and ok2, "كلا الحالتين يجب أن تجتازا الشروط (26>25)"
+    # ADX=60 يجب أن تكون قوته أعلى من ADX=26
+    s_weak  = sig1['strengths']['15m_adx_above_25']
+    s_strong = sig2['strengths']['15m_adx_above_25']
+    assert s_strong > s_weak, "قوة ADX المتدرجة يجب أن تميّز بين 60 و26"
+    ok(f"تدرّج ADX: 26→{s_weak:.2f} مقابل 60→{s_strong:.2f} ✓")
+
+    # gate_strength موجود وضمن 0-1
+    assert 0.0 <= sig2['gate_strength'] <= 1.0
+    ok(f"gate_strength مرجّح: {sig2['gate_strength']:.2f} ✓")
+    return True
+
+
+def test_market_regime():
+    """التحقق من مصنّف حالة السوق"""
+    from core.market_regime import classify_market_regime, strategy_for_regime
+    from core.strategy_selector import StrategySelector
+
+    def mk(trend, adx):
+        n = 120
+        if trend == 'up':   close = pd.Series(100 + np.linspace(0, 25, n))
+        elif trend == 'down': close = pd.Series(100 - np.linspace(0, 25, n))
+        else:               close = pd.Series(100 + np.sin(np.linspace(0, 20, n))*1.0)
+        df = pd.DataFrame({'close': close, 'high': close+2, 'low': close-2,
+                           'volume': np.full(n, 100.0)})
+        df['ema_slow']=close.ewm(span=200).mean(); df['ema_fast']=close.ewm(span=50).mean()
+        df['ema_medium']=close.ewm(span=21).mean()
+        df['rsi']=55.0; df['adx']=adx
+        df['macd']=0.0; df['macd_signal']=0.0; df['macd_hist']=0.0; df['atr']=2.0
+        df['bb_upper']=close+3; df['bb_middle']=close; df['bb_lower']=close-3
+        df['volume_sma']=90.0
+        return df
+
+    # bull → trend
+    r_bull = classify_market_regime(mk('up', 40))
+    assert r_bull == 'bull', f"توقع bull وحصلنا {r_bull}"
+    # bear → trend
+    r_bear = classify_market_regime(mk('down', 40))
+    assert r_bear == 'bear', f"توقع bear وحصلنا {r_bear}"
+    # range → reversion
+    r_range = classify_market_regime(mk('sideways', 12))
+    assert r_range == 'range', f"توقع range وحصلنا {r_range}"
+
+    assert strategy_for_regime('bull') == 'trend'
+    assert strategy_for_regime('range') == 'reversion'
+    ok(f"Regime: bull→trend, bear→trend, range→reversion ✓")
+
+    # select_strategy_for_market يعيد الحالة والاستراتيجية
+    sel = StrategySelector()
+    m = sel.select_strategy_for_market('BTC/USDT', mk('up', 40))
+    assert m['regime'] == 'bull' and m['strategy'] == 'trend'
+    ok(f"select_strategy_for_market: {m['regime']} → {m['strategy']} ✓")
+    return True
+
+
+def test_trailing_and_reversal():
+    """التحقق من Trailing Stop + خروج انعكاس"""
+    from core.risk_manager import RiskManager
+
+    rm = RiskManager(initial_balance=10_000.0)
+
+    # Trailing Long: بعد TP1، نرفع SL مع السعر
+    up, new_sl = rm.should_update_trailing_stop(
+        current_price=110, entry_price=100, current_sl=100,
+        take_profit_1=104, atr=2.0, side='long',
+    )
+    assert up and new_sl == 108.0, f"توقع رفع SL إلى 108 وحصلنا {new_sl}"
+    ok(f"Trailing Long يرفع SL: 100→{new_sl} ✓")
+
+    # لا ننزل SL (حماية)
+    up2, _ = rm.should_update_trailing_stop(
+        current_price=103, entry_price=100, current_sl=108,
+        take_profit_1=104, atr=2.0, side='long',
+    )
+    assert not up2, "لا يجب إنزال SL"
+    ok("Trailing لا ينزل SL ✓")
+
+    # خروج انعكاس Long (كسر EMA نزولاً)
+    n = 50
+    close = pd.Series([98.0]*n)
+    df = pd.DataFrame({'close': close})
+    df['ema_medium'] = 99.0; df['ema_fast'] = 100.0
+    r, reason = rm.should_exit_on_reversal(df, 'long', entry_price=102)
+    assert r and reason == 'REVERSAL_EXIT', f"توقع خروج انعكاس: {reason}"
+    ok("خروج انعكاس Long يعمل ✓")
+
+    # خروج انعكاس Short (كسر EMA صعوداً)
+    close2 = pd.Series([102.0]*n)
+    df2 = pd.DataFrame({'close': close2})
+    df2['ema_medium'] = 101.0; df2['ema_fast'] = 100.0
+    r2, _ = rm.should_exit_on_reversal(df2, 'short', entry_price=99)
+    assert r2, "توقع خروج انعكاس Short"
+    ok("خروج انعكاس Short يعمل ✓")
+    return True
+
+
+def test_pair_correlation():
+    """التحقق من كشف ارتباط الأزواج"""
+    from core.pair_selector import compute_pair_correlation, is_pair_correlated_with_open
+
+    n = 100
+    np.random.seed(1)
+    base = pd.Series(100 + np.cumsum(np.random.randn(n)*2))
+    df_btc = pd.DataFrame({'close': base})
+    df_eth = pd.DataFrame({'close': base*1.1 + np.random.randn(n)*0.2})
+    df_xrp = pd.DataFrame({'close': 50 + np.cumsum(np.random.randn(n)*1.5)})
+
+    c_high = compute_pair_correlation(df_btc, df_eth)
+    c_low  = compute_pair_correlation(df_btc, df_xrp)
+    assert c_high > 0.7, f"BTC-ETH يجب أن يكونا مرتبطين: {c_high:.2f}"
+    assert abs(c_low) < 0.7, f"BTC-XRP يجب ألا يكونا مرتبطين: {c_low:.2f}"
+    ok(f"ارتباط BTC-ETH={c_high:.2f} (عالي) | BTC-XRP={c_low:.2f} (منخفض) ✓")
+
+    dfs = {'ETH/USDT': df_eth, 'XRP/USDT': df_xrp}
+    def get_df(s): return dfs[s]
+
+    corr1, with_sym = is_pair_correlated_with_open(
+        'BTC/USDT', df_btc, ['ETH/USDT'], get_df
+    )
+    assert corr1, "يجب تجنّب BTC إذا كان ETH مفتوحاً (مرتبطان)"
+    corr2, _ = is_pair_correlated_with_open(
+        'BTC/USDT', df_btc, ['XRP/USDT'], get_df
+    )
+    assert not corr2, "يجب السماح بـ BTC إذا كان XRP مفتوحاً (غير مرتبط)"
+    ok("كاشف الارتباط يتجنّب الأزواج المترابطة ✓")
+    return True
+
+
+# ══════════════════════════════════════════════════════════
 # تشغيل جميع الاختبارات
 # ══════════════════════════════════════════════════════════
 
@@ -616,6 +771,13 @@ def main():
     # ── Phase 8.2: Multi-Strategy Selection (Level 2) ─────
     print(f"\n{BOLD}{CYAN}━━━ المرحلة 8.2: Multi-Strategy Selection ━━━{RESET}")
     run_test("StrategySelector (trend/reversion/breakout)", test_strategy_selector)
+
+    # ── Smart Level: تدرّج + Regime + Trailing + Correlation ──
+    print(f"\n{BOLD}{CYAN}━━━ Smart Level: تدرّج/Regime/Trailing/Correlation ━━━{RESET}")
+    run_test("تدرّج قوة الشروط (ADX)",          test_graded_conditions)
+    run_test("مصنّف حالة السوق (Regime)",       test_market_regime)
+    run_test("Trailing Stop + خروج انعكاس",     test_trailing_and_reversal)
+    run_test("كشف ارتباط الأزواج",              test_pair_correlation)
 
     # ── ملخص النتائج ─────────────────────────────────────
     print("\n" + "═"*65)

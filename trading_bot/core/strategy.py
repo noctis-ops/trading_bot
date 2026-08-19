@@ -292,6 +292,15 @@ class TradingStrategy:
                     'failed':     failed,
                 }
 
+            # ── قوة متدرجة لكل شرط (0-1) — بدل الثنائية الصارمة ──
+            # كل شرط يُقيَّم بقوة جزئية بحيث نميّز بين "قوي جداً" و"ضعيف".
+            # يبقى Hard Gates (all_passed) كحارس دخول، لكن strength يُستخدم
+            # لاحقاً لتعديل حجم الصفقة وترتيب الأولوية بين الإشارات.
+            strengths = self._compute_buy_strengths(
+                c1h=c1h, c15m=c15m, ema21_dist=ema21_dist,
+            )
+            gate_strength = self._weighted_gate_strength(strengths)
+
             # ── تجميع بيانات الإشارة ────────────────────
             atr_val = float(c15m.get('atr', 0))
             signal_data = {
@@ -305,12 +314,180 @@ class TradingStrategy:
                 'ema21_dist':  ema21_dist,
                 'conditions':  conditions,
                 'all_passed':  True,
+                'strengths':   strengths,
+                'gate_strength': gate_strength,
             }
             return True, signal_data
 
         except Exception as e:
             logger.error(f"❌ خطأ في check_buy_signal: {e}")
             return False, {'reason': f'استثناء: {e}', 'conditions': {}}
+
+    # ═══════════════════════════════════════════════════
+    # قوة متدرجة للشروط (بدل الثنائية الصارمة) — Level: Smart
+    # ═══════════════════════════════════════════════════
+
+    def _compute_buy_strengths(self, c1h, c15m, ema21_dist: float) -> Dict[str, float]:
+        """
+        حساب قوة كل شرط (0-1) بحيث يميّز بين "قوي جداً" و"ضعيف".
+
+        يبقى Hard Gates كحارس دخول (all_passed)، لكن هذه القوة المتدرجة
+        تُستخدم لتعديل حجم الصفقة وترتيب الإشارات — فيصبح البوت "أذكى"
+        في التمييز بين إشارة ADX=26 و ADX=60 مثلاً.
+
+        Returns:
+            dict باسم كل شرط وقوته 0-1
+        """
+        close = float(c15m['close'])
+        ema200_1h = float(c1h.get('ema_slow', 0))
+        ema50_1h  = float(c1h.get('ema_fast', 0))
+        adx_val   = float(c15m.get('adx', 0))
+        vol       = float(c15m.get('volume', 0))
+        vol_sma   = float(c15m.get('volume_sma', 0))
+        rsi_val   = float(c15m.get('rsi', 50))
+        macd_val  = float(c15m.get('macd', 0))
+        signal_val = float(c15m.get('macd_signal', 0))
+
+        # ── 1) بعد السعر عن EMA200 (كلما أبعد أعلاه = أقوى) ──
+        s1 = 0.0
+        if ema200_1h > 0:
+            dist = (close - ema200_1h) / ema200_1h * 100  # %
+            s1 = min(1.0, max(0.0, dist / 5.0))           # 5%+ فوق = كامل
+
+        # ── 2) فجوة EMA50>EMA200 (كلما أوسع = أقوى) ────────
+        s2 = 0.0
+        if ema200_1h > 0 and ema50_1h > ema200_1h:
+            gap = (ema50_1h - ema200_1h) / ema200_1h * 100
+            s2 = min(1.0, max(0.0, gap / 2.0))            # 2%+ فجوة = كامل
+
+        # ── 3) ADX (25=بداية، 50+=كامل) ────────────────────
+        s3 = min(1.0, max(0.0, (adx_val - self.ADX_THRESHOLD) / 25.0))
+
+        # ── 4) نسبة الحجم (1×=بداية، 2×+=كامل) ─────────────
+        s4 = 0.0
+        if vol_sma > 0:
+            ratio = vol / vol_sma
+            s4 = min(1.0, max(0.0, (ratio - 1.0) / 1.0))
+
+        # ── 5) RSI داخل 50-70 (الأقرب للمثالي 55-65 = أقوى) ─
+        s5 = 0.0
+        if self.RSI_MIN <= rsi_val <= self.RSI_MAX:
+            # نقاط الذروة عند منتصف المنطقة
+            s5 = 1.0 - abs(rsi_val - 60) / 20.0           # 60 مثالي
+            s5 = max(0.3, min(1.0, s5))                    # حد أدنى 0.3
+
+        # ── 6) قوة MACD (الفجوة مقسّمة على السعر) ─────────
+        s6 = 0.0
+        if macd_val > signal_val and close > 0:
+            gap_pct = (macd_val - signal_val) / close * 100
+            s6 = min(1.0, max(0.0, gap_pct / 0.5))         # 0.5%+ = كامل
+
+        # ── [+] قرب السعر من EMA21 (أقرب = أفضل دخول) ─────
+        s7 = 0.0
+        if ema21_dist <= self.MAX_EMA_DISTANCE:
+            s7 = 1.0 - (ema21_dist / self.MAX_EMA_DISTANCE)  # 0%=1, 2%=0
+
+        return {
+            '1h_price_above_ema200':   round(s1, 3),
+            '1h_ema50_above_ema200':   round(s2, 3),
+            '15m_adx_above_25':        round(s3, 3),
+            '15m_volume_above_sma20':  round(s4, 3),
+            '15m_rsi_in_range_50_70':  round(s5, 3),
+            '15m_macd_above_signal':   round(s6, 3),
+            '15m_price_near_ema21':    round(s7, 3),
+        }
+
+    @staticmethod
+    def _weighted_gate_strength(strengths: Dict[str, float]) -> float:
+        """
+        متوسط مرجّح لقوة الشروط (0-1).
+
+        الأوزان: الاتجاه (1,2) أهم، ثم الزخم (5,6)، ثم الحجم (4)،
+        ثم ADX (3) والمسافة (7). المجموع = 1.0.
+        """
+        weights = {
+            '1h_price_above_ema200':   0.20,
+            '1h_ema50_above_ema200':   0.15,
+            '15m_adx_above_25':        0.15,
+            '15m_volume_above_sma20':  0.15,
+            '15m_rsi_in_range_50_70':  0.15,
+            '15m_macd_above_signal':   0.15,
+            '15m_price_near_ema21':    0.05,
+        }
+        total = 0.0
+        w_sum = 0.0
+        for k, w in weights.items():
+            total += strengths.get(k, 0.0) * w
+            w_sum += w
+        return round(total / w_sum, 3) if w_sum > 0 else 0.0
+
+    def _compute_short_strengths(self, c1h, c15m, ema21_dist: float) -> Dict[str, float]:
+        """
+        حساب قوة كل شرط للـ Short (0-1) — مرآة _compute_buy_strengths.
+
+        الاتجاه معكوس: السعر تحت EMA200، EMA50 تحت EMA200، RSI في 30-50،
+        MACD تحت Signal.
+
+        Returns:
+            dict باسم كل شرط وقوته 0-1
+        """
+        close = float(c15m['close'])
+        ema200_1h = float(c1h.get('ema_slow', 0))
+        ema50_1h  = float(c1h.get('ema_fast', 0))
+        adx_val   = float(c15m.get('adx', 0))
+        vol       = float(c15m.get('volume', 0))
+        vol_sma   = float(c15m.get('volume_sma', 0))
+        rsi_val   = float(c15m.get('rsi', 50))
+        macd_val  = float(c15m.get('macd', 0))
+        signal_val = float(c15m.get('macd_signal', 0))
+
+        # ── 1) بعد السعر تحت EMA200 (أبعد أعلاه = هبوط أقوى) ──
+        s1 = 0.0
+        if ema200_1h > 0 and close < ema200_1h:
+            dist = (ema200_1h - close) / ema200_1h * 100
+            s1 = min(1.0, max(0.0, dist / 5.0))
+
+        # ── 2) فجوة EMA50 تحت EMA200 ────────────────────────
+        s2 = 0.0
+        if ema200_1h > 0 and ema50_1h < ema200_1h:
+            gap = (ema200_1h - ema50_1h) / ema200_1h * 100
+            s2 = min(1.0, max(0.0, gap / 2.0))
+
+        # ── 3) ADX ──────────────────────────────────────────
+        s3 = min(1.0, max(0.0, (adx_val - self.ADX_THRESHOLD) / 25.0))
+
+        # ── 4) نسبة الحجم ───────────────────────────────────
+        s4 = 0.0
+        if vol_sma > 0:
+            ratio = vol / vol_sma
+            s4 = min(1.0, max(0.0, (ratio - 1.0) / 1.0))
+
+        # ── 5) RSI داخل 30-50 (الأقرب للمثالي 35-45 = أقوى) ─
+        s5 = 0.0
+        if self.RSI_SHORT_MIN <= rsi_val <= self.RSI_SHORT_MAX:
+            s5 = 1.0 - abs(rsi_val - 40) / 20.0   # 40 مثالي
+            s5 = max(0.3, min(1.0, s5))
+
+        # ── 6) قوة MACD (فجوة تحت الخط) ─────────────────────
+        s6 = 0.0
+        if macd_val < signal_val and close > 0:
+            gap_pct = (signal_val - macd_val) / close * 100
+            s6 = min(1.0, max(0.0, gap_pct / 0.5))
+
+        # ── [+] قرب السعر من EMA21 ──────────────────────────
+        s7 = 0.0
+        if ema21_dist <= self.MAX_EMA_DISTANCE:
+            s7 = 1.0 - (ema21_dist / self.MAX_EMA_DISTANCE)
+
+        return {
+            '1h_price_below_ema200':   round(s1, 3),
+            '1h_ema50_below_ema200':   round(s2, 3),
+            '15m_adx_above_25':        round(s3, 3),
+            '15m_volume_above_sma20':  round(s4, 3),
+            '15m_rsi_in_range_30_50':  round(s5, 3),
+            '15m_macd_below_signal':   round(s6, 3),
+            '15m_price_near_ema21':    round(s7, 3),
+        }
 
     # ═══════════════════════════════════════════════════
     # SHORT (المرحلة 6) — المستوى 1: الشروط الستة المعكوسة
@@ -407,6 +584,13 @@ class TradingStrategy:
                 }
 
             atr_val = float(c15m.get('atr', 0))
+
+            # ── قوة متدرجة للـ Short (مرآة Long) ───────────
+            strengths = self._compute_short_strengths(
+                c1h=c1h, c15m=c15m, ema21_dist=ema21_dist,
+            )
+            gate_strength = self._weighted_gate_strength(strengths)
+
             signal_data = {
                 'signal':      'SELL',
                 'side':        'short',
@@ -419,6 +603,8 @@ class TradingStrategy:
                 'ema21_dist':  ema21_dist,
                 'conditions':  conditions,
                 'all_passed':  True,
+                'strengths':   strengths,
+                'gate_strength': gate_strength,
             }
             return True, signal_data
 

@@ -34,6 +34,11 @@ from typing import Dict, Tuple
 from utils.logger import logger
 from indicators.trend import get_trend_score, get_bearish_trend_score
 from indicators.volatility import get_volatility_summary
+from core.market_regime import (
+    classify_market_regime,
+    strategy_for_regime,
+    regime_label,
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -232,6 +237,40 @@ class StrategySelector:
         scores = self.get_scores(symbol, df)
         best_strategy = max(scores, key=scores.get)
         return best_strategy, scores[best_strategy]
+
+    def select_strategy_for_market(self, symbol: str, df: pd.DataFrame) -> Dict:
+        """
+        اختيار الاستراتيجية بناءً على حالة السوق (Regime) أولاً.
+
+        الفرق عن select_best_strategy:
+            هنا نحدد حالة السوق أولاً (bull/bear/range/volatile) ثم نختار
+            الاستراتيجية المناسبة لها — متبعةً منطق خبير التداول (Regime
+            أولاً، ثم استراتيجية). select_best_strategy يختار الأعلى درجة
+            فقط دون إدراك الحالة الكلية.
+
+        Args:
+            symbol: الزوج
+            df:     DataFrame مكتمل المؤشرات
+
+        Returns:
+            dict يحوي:
+                regime:       حالة السوق
+                strategy:     الاستراتيجية المختارة
+                strategy_score: درجة الاستراتيجية
+                scores:       درجات الاستراتيجيات الثلاث
+        """
+        regime = classify_market_regime(df)
+        strategy = strategy_for_regime(regime)
+        scores = self.get_scores(symbol, df)
+        strategy_score = scores.get(strategy, 0.0)
+
+        return {
+            'regime':          regime,
+            'regime_label':    regime_label(regime),
+            'strategy':        strategy,
+            'strategy_score':  strategy_score,
+            'scores':          scores,
+        }
 
     def print_selection(self, symbol: str, df: pd.DataFrame):
         """طباعة درجات الاستراتيجيات والاختيار بشكل منسق."""

@@ -74,6 +74,13 @@ from core.order_manager import OrderManager
 from database.trade_logger import TradeLogger
 from database.models import close_db
 from notifications.telegram_bot import TelegramNotifier
+from core.market_regime import (
+    classify_market_regime,
+    allowed_directions_for_regime,
+    regime_label,
+)
+from core.strategy_selector import StrategySelector
+from core.pair_selector import is_pair_correlated_with_open
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -191,6 +198,11 @@ class TradingBot:
 
         # ── Phase 5.3: تنبيهات Telegram ───────────────────
         self.notifier = notifier or TelegramNotifier(get_bot=lambda: self)
+
+        # ── Phase 8.2: محول اختيار الاستراتيجية (Level 2) ──
+        # يحدد حالة السوق (Regime) لكل زوج ويختار الاستراتيجية الأنسب
+        # (Trend / Reversion / Breakout) بدل الاعتماد على Trend فقط.
+        self.strategy_selector = StrategySelector()
 
         # ── كشف البيئة (نفس منطق order_manager._is_paper) ─
         self._environment = (
@@ -372,15 +384,51 @@ class TradingBot:
             df_1h = self.market_data.get_complete_dataframe(symbol, self.TREND_TIMEFRAME)
             df_5m = self.market_data.get_complete_dataframe(symbol, self.CONFIRMATION_TIMEFRAME)
 
-            # ── نحاول LONG أولاً (الصعود) ثم SHORT (الهبوط) — لا يُفتح
-            #    الاتجاهان معاً على نفس الرمز في الدورة نفسها ──
-            long_breakdown = self.strategy.get_signal_breakdown(df_1h, df_main, df_5m)
-            if self._execute_signal(symbol, 'long', long_breakdown, df_main, balance):
-                return True
+            # ── كشف ارتباط الأزواج (تنويع حقيقي) ────────────────────
+            # نتجنّب فتح صفقة على زوج مرتبط بشدة بزوج مفتوح أصلاً، لأن
+            # الأزواج المترابطة (BTC/ETH/BNB) ليست تنويعاً بل رافعة مضاعفة.
+            open_symbols = list(self.order_manager.get_all_open_positions().keys())
+            if open_symbols:
+                corr, with_sym = is_pair_correlated_with_open(
+                    candidate_symbol=symbol,
+                    candidate_df=df_main,
+                    open_symbols=open_symbols,
+                    get_df_for_symbol=lambda s: (
+                        self.market_data.get_complete_dataframe(
+                            s, self.MAIN_TIMEFRAME
+                        )
+                    ),
+                )
+                if corr:
+                    logger.debug(
+                        f"⏭️ {symbol}: مرتبط بـ {with_sym} — تجنّب (تنويع حقيقي)"
+                    )
+                    return False
 
-            short_breakdown = self.strategy.get_short_signal_breakdown(df_1h, df_main, df_5m)
-            if self._execute_signal(symbol, 'short', short_breakdown, df_main, balance):
-                return True
+            # ── Level 2 (Phase 8.2): حدد حالة السوق والاستراتيجية أولاً ──
+            # خبير التداول يحدد الـ Regime قبل أي قرار. نستخدمه لتحديد:
+            #   1) الاستراتيجية الأنسب (Trend/Reversion/Breakout)
+            #   2) الاتجاهات المسموحة في هذه الحالة
+            regime = classify_market_regime(df_main)
+            sel = self.strategy_selector.select_strategy_for_market(symbol, df_main)
+            directions = allowed_directions_for_regime(regime)
+
+            logger.debug(
+                f"🧭 {symbol}: حالة السوق={regime_label(regime)} | "
+                f"الاستراتيجية={sel['strategy']} | "
+                f"الاتجاهات المسموحة={directions}"
+            )
+
+            # ── نحاول الاتجاهات المسموحة فقط (بالترتيب: Long ثم Short) ──
+            # بناءً على حالة السوق — لا نُهدر الوقت بفحص اتجاه لا يناسب الـ Regime
+            for direction in directions:
+                if direction == 'long':
+                    breakdown = self.strategy.get_signal_breakdown(df_1h, df_main, df_5m)
+                else:
+                    breakdown = self.strategy.get_short_signal_breakdown(df_1h, df_main, df_5m)
+
+                if self._execute_signal(symbol, direction, breakdown, df_main, balance):
+                    return True
 
             return False
 
@@ -427,6 +475,14 @@ class TradingBot:
         score       = breakdown['score_result'].get('total_score', 0)
         signal_data['score'] = score   # لضمان تسجيلها الصحيح داخل OrderManager
 
+        # ── دمج قوة الشروط المتدرجة (Smart Level) في حجم الصفقة ──
+        # score (0-100) من نظام التقييم + gate_strength (0-1) من تدرّج
+        # الشروط الستة. نضيفه كمعزّز: إشارة شروطها أقوى → حجم أكبر.
+        gate_strength = signal_data.get('gate_strength', 0.0)
+        # نحوّل gate_strength إلى نسبة إضافية (0-1) تُدمج مع score
+        effective_score = score * (0.7 + 0.3 * gate_strength)
+        signal_data['effective_score'] = round(effective_score, 2)
+
         logger.info(
             f"🔎 إشارة {direction.upper()} محتملة | {symbol} | Score={score:.1f} | "
             f"{breakdown.get('entry_quality', '')}"
@@ -464,7 +520,7 @@ class TradingBot:
             balance         = balance,
             entry_price     = signal_data['entry_price'],
             stop_loss_price = stops['stop_loss'],
-            signal_score    = score,
+            signal_score    = effective_score,
             volatility_df   = df_main,
             side            = direction,
         )

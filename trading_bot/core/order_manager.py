@@ -701,9 +701,18 @@ class OrderManager:
             events.append({'symbol': sym, 'reason': reason, 'pnl': pnl})
             logger.trade_exit(sym, pos['side'], pos['entry_price'], price, pnl, pnl_pct, reason)
 
-        # ── تحقق من Breakeven لصفقات لم تُغلق بعد ─────
+        # ── تحقق من Breakeven + Trailing لصفقات لم تُغلق بعد ─────
         for sym in list(self.open_positions.keys()):
             self._check_and_apply_breakeven(sym)
+            try:
+                pos = self.open_positions.get(sym)
+                if pos:
+                    ticker = self.exchange.fetch_ticker(sym)
+                    cprice = float(ticker.get('close', 0))
+                    if cprice > 0:
+                        self._apply_trailing_stop(sym, cprice)
+            except Exception as e:
+                logger.debug(f"⚠️ خطأ في trailing paper ({sym}): {e}")
 
         return events
 
@@ -778,8 +787,10 @@ class OrderManager:
                         })
 
                 else:
-                    # لم يُغلَق — تحقق من Breakeven
+                    # لم يُغلَق — تحقق من Breakeven + Trailing + انعكاس الاتجاه
                     self._check_and_apply_breakeven(symbol)
+                    self._apply_trailing_stop(symbol, current_price)
+                    self._apply_reversal_exit(symbol)
 
             except Exception as e:
                 logger.error(f"❌ خطأ في مراقبة {symbol}: {e}")
@@ -820,6 +831,103 @@ class OrderManager:
 
         except Exception as e:
             logger.error(f"❌ خطأ في _check_and_apply_breakeven ({symbol}): {e}")
+
+    def _apply_trailing_stop(self, symbol: str, current_price: float):
+        """
+        تطبيق Trailing Stop بعد تجاوز TP1 — يحمي الربح المتزايد.
+
+        بعد أن يتحرك السعر لصالح الصفقة (فوق TP1 للـ Long / تحت TP1 للـ Short)،
+        نرفع/ننزل SL ليتبع السعر بمسافة أمان ATR×1.0، فلا يضيع ربح كبير
+        إذا انعكس السوق.
+        """
+        pos = self.open_positions.get(symbol)
+        # يتطلب أن تكون الصفقة تجاوزت TP1 (tp1_hit=True يعني خرجنا 50%)
+        if not pos or not pos.get('tp1_hit', False):
+            return
+
+        try:
+            side = pos.get('side', 'long')
+            # نحتاج ATR — نجلب من آخر شمعة أو نستخدم مسافة SL/TP الحالية
+            # كتقدير للمسافة. نستخدم تقدير ATR = (SL الأصلي قبل breakeven).
+            # عملياً: نستخدم ATR محسوب من بيانات السوق لاحقاً؛ هنا نقدّر
+            # من مسافة TP1 إلى الدخول (وهي ATR×2.0 في تصميمنا).
+            atr_est = 0.0
+            tp1 = pos.get('take_profit_1', 0)
+            entry = pos.get('entry_price', 0)
+            if tp1 > 0 and entry > 0:
+                atr_est = abs(tp1 - entry) / 2.0   # لأن TP1 = entry ± ATR×2
+
+            should_update, new_sl = self.risk_manager.should_update_trailing_stop(
+                current_price  = current_price,
+                entry_price    = entry,
+                current_sl     = pos.get('stop_loss', 0),
+                take_profit_1  = tp1,
+                atr            = atr_est,
+                side           = side,
+                trail_atr_mult = 1.0,
+            )
+
+            if should_update and new_sl:
+                self.open_positions[symbol]['stop_loss'] = new_sl
+                self.open_positions[symbol]['sl_trailing'] = True
+                self._update_stop_loss_order(symbol, new_sl)
+                logger.info(
+                    f"📐 Trailing Stop | {symbol} {side} | "
+                    f"SL الجديد = ${new_sl:,.2f}"
+                )
+
+        except Exception as e:
+            logger.debug(f"⚠️ خطأ في _apply_trailing_stop ({symbol}): {e}")
+
+    def _apply_reversal_exit(self, symbol: str):
+        """
+        خروج مبكر عند انعكاس الاتجاه (كسر EMA على 15M).
+
+        لا ينتظر SL/TP — إذا انعكس الاتجاه المعاكس لإشارتنا، يخرج مبكراً
+        لحجز الربح أو تقليل الخسارة (سلوك خبير التداول).
+        """
+        pos = self.open_positions.get(symbol)
+        if not pos:
+            return
+
+        try:
+            df_15m = self._get_reversal_df(symbol)
+            if df_15m is None:
+                return
+
+            side = pos.get('side', 'long')
+            should_exit, reason = self.risk_manager.should_exit_on_reversal(
+                df_15m=df_15m, side=side, entry_price=pos['entry_price'],
+            )
+
+            if should_exit:
+                logger.warning(
+                    f"🔄 خروج مبكر بانعكاس الاتجاه | {symbol} {side} | {reason}"
+                )
+                self.close_position(symbol, reason=reason)
+
+        except Exception as e:
+            logger.debug(f"⚠️ خطأ في _apply_reversal_exit ({symbol}): {e}")
+
+    def _get_reversal_df(self, symbol: str):
+        """جلب DataFrame 15M مع المؤشرات لفحص انعكاس الاتجاه (إن توفر)."""
+        try:
+            # نعتمد على market_data عبر exchange (fetch_ohlcv) إن أمكن
+            ohlcv = self.exchange.fetch_ohlcv(symbol, '15m', limit=60)
+            if not ohlcv:
+                return None
+            import pandas as pd
+            df = pd.DataFrame(ohlcv, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume'
+            ])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            close = df['close']
+            df['ema_medium'] = close.ewm(span=21, adjust=False).mean()
+            df['ema_fast']   = close.ewm(span=50, adjust=False).mean()
+            return df
+        except Exception:
+            return None
 
     # ═══════════════════════════════════════════════════
     # وضع/تحديث/إلغاء الأوامر

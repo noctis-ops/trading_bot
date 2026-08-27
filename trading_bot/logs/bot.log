@@ -2552,3 +2552,257 @@
 2026-06-22 18:33:35 | SUCCESS  | utils.logger:success:121 - ✅ Server/Testnet متاح
 2026-06-22 18:33:35 | CRITICAL | utils.logger:critical:133 - ❌ خطأ في اختبار الاتصال: binance testnet/sandbox mode is not supported for futures anymore, please check the deprecation announcement https://t.me/ccxt_announcements/92 and consider using the demo trading instead.
 2026-06-22 18:33:35 | CRITICAL | utils.logger:critical:133 - ❌ خطأ في تهيئة البينانس: binance testnet/sandbox mode is not supported for futures anymore, please check the deprecation announcement https://t.me/ccxt_announcements/92 and consider using the demo trading instead.
+2026-08-19 21:02:39 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-19 21:02:39 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-19 21:02:39 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-19 21:02:39 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-19 21:02:39 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-19 21:02:45 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-19 21:02:45 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: ETH/USDT, BNB/USDT, BTC/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 3 | دورة الفحص: 60ث
+2026-08-19 21:03:28 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-19 21:03:28 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-19 21:03:28 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-19 21:03:28 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-19 21:03:28 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-19 21:03:30 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: ETH/USDT, BNB/USDT, BTC/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 3 | دورة الفحص: 60ث
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-19 21:03:30 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-19 21:03:38 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-19 21:15:02 | INFO     | utils.logger:info:117 - 🔌 TelegramNotifier أوقف خلفيته بأمان
+2026-08-19 21:15:02 | INFO     | utils.logger:info:117 - 👋 TradingBot توقف بأمان
+2026-08-21 20:06:26 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-21 20:06:26 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-21 20:06:26 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-21 20:06:26 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-21 20:06:26 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-21 20:06:29 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: ETH/USDT, BNB/USDT, BTC/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 3 | دورة الفحص: 60ث
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-21 20:06:29 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-21 20:06:37 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-21 20:21:53 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=15m
+2026-08-21 20:24:29 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-21 20:24:29 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-21 20:24:29 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-21 20:24:29 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-21 20:24:29 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-21 20:24:30 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-21 20:24:30 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-21 20:24:40 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-21 20:40:06 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=15m
+2026-08-21 20:55:36 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=31m
+2026-08-21 21:08:08 | INFO     | utils.logger:info:117 - 🔌 TelegramNotifier أوقف خلفيته بأمان
+2026-08-21 21:08:08 | INFO     | utils.logger:info:117 - 👋 TradingBot توقف بأمان
+2026-08-26 01:06:40 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 01:06:40 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-26 01:06:40 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-26 01:06:40 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-26 01:06:40 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 01:06:48 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-26 01:06:48 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-26 01:07:08 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-26 01:22:42 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=15m
+2026-08-26 01:38:44 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=31m
+2026-08-26 01:54:38 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=47m
+2026-08-26 02:10:31 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=1h 3m
+2026-08-26 23:27:29 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:27:29 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-26 23:27:29 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-26 23:27:29 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-26 23:27:29 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:27:32 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-26 23:27:32 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-26 23:27:36 | ERROR    | utils.logger:error:129 - ❌ خطأ في حلقة Telegram: The token `8517529028:AAGiwyFbuNoQb90L0s6iC1cYc3eSs_pn-Ag` was rejected by the server.
+2026-08-26 23:27:53 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-26 23:28:11 | INFO     | utils.logger:info:117 - 🔌 TelegramNotifier أوقف خلفيته بأمان
+2026-08-26 23:28:11 | INFO     | utils.logger:info:117 - 👋 TradingBot توقف بأمان
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:34:44 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-26 23:34:44 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-26 23:34:45 | ERROR    | utils.logger:error:129 - ❌ خطأ في حلقة Telegram: The token `8517529028:AAGiwyFbuNoQb90L0s6iC1cYc3eSs_pn-Ag` was rejected by the server.
+2026-08-26 23:34:51 | INFO     | utils.logger:info:117 - 🔌 TelegramNotifier أوقف خلفيته بأمان
+2026-08-26 23:34:51 | INFO     | utils.logger:info:117 - 👋 TradingBot توقف بأمان
+2026-08-26 23:35:13 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:35:13 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-26 23:35:13 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-26 23:35:13 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-26 23:35:13 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:35:14 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-26 23:35:14 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-26 23:35:15 | ERROR    | utils.logger:error:129 - ❌ خطأ في حلقة Telegram: The token `8517529028:AAGiwyFbuNoQb90L0s6iC1cYc3eSs_pn-Ag` was rejected by the server.
+2026-08-26 23:35:22 | INFO     | utils.logger:info:117 - 🔌 TelegramNotifier أوقف خلفيته بأمان
+2026-08-26 23:35:22 | INFO     | utils.logger:info:117 - 👋 TradingBot توقف بأمان
+2026-08-26 23:39:47 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:39:47 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-26 23:39:47 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-26 23:39:47 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-26 23:39:47 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:39:48 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-26 23:39:48 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-26 23:39:56 | ERROR    | utils.logger:error:129 - ❌ خطأ في حلقة Telegram: Timed out
+2026-08-26 23:40:02 | INFO     | utils.logger:info:117 - 🔌 TelegramNotifier أوقف خلفيته بأمان
+2026-08-26 23:40:02 | INFO     | utils.logger:info:117 - 👋 TradingBot توقف بأمان
+2026-08-26 23:40:24 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:40:24 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-26 23:40:24 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-26 23:40:24 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-26 23:40:24 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-26 23:40:25 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-26 23:40:25 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-26 23:41:00 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-27 22:07:47 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-27 22:07:47 | SUCCESS  | utils.logger:success:121 - 🚀 نظام التسجيل جاهز
+2026-08-27 22:07:47 | SUCCESS  | utils.logger:success:121 - 📋 مستوى السجلات: INFO
+2026-08-27 22:07:47 | SUCCESS  | utils.logger:success:121 - 📁 ملف السجلات: ./logs/bot.log
+2026-08-27 22:07:47 | SUCCESS  | utils.logger:success:121 - ============================================================
+2026-08-27 22:07:50 | INFO     | utils.logger:info:117 - 🤖 جاري تهيئة TradingBot...
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ Paper Trading Engine جاهز
+   💰 الرصيد الوهمي: $10,000.00 USDT
+   📊 البيانات: حقيقية من بينانس (API عام)
+   🛡️  الأوامر: محاكاة محلية (لا أموال حقيقية)
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ فئة MarketData جاهزة
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ استراتيجية جاهزة: Trend Following + Momentum v1.3
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ RiskManager جاهز | Risk/Trade=2.0% | MaxLev=10x | MaxDailyLoss=6.0% | CooldownAfter=3 خسائر
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ OrderManager جاهز | 📝 Paper Trading | MaxRetry=3 | MaxLev=10x | Margin=isolated
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ TelegramNotifier جاهز (مُفعّل)
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ StrategySelector جاهز (Level 2): trend / reversion / breakout
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ TradingBot جاهز | الرموز: BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, DOGE/USDT | الأطر: 1h/15m/5m | صفقات متزامنة قصوى: 5 | دورة الفحص: 60ث
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ قاعدة البيانات جاهزة | ./data/trading_bot.db | الجداول: trades, signals, daily_performance
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - 💾 قاعدة البيانات موصولة بالبوت (Phase 5.2) — الإشارات والصفقات والأداء اليومي ستُسجَّل دائماً
+2026-08-27 22:07:50 | SUCCESS  | utils.logger:success:121 - ✅ جدولة Telegram مفعّلة | يومي 00:00 | أسبوعي sunday 00:00 (UTC)
+2026-08-27 22:07:59 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=0m
+2026-08-27 22:23:30 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=15m
+2026-08-27 22:39:03 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=31m
+2026-08-27 22:54:33 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=46m
+2026-08-27 23:10:01 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=1h 2m
+2026-08-27 23:25:29 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=1h 17m
+2026-08-27 23:41:00 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=1h 33m
+2026-08-27 23:56:28 | INFO     | utils.logger:bot_status:192 - 🟢 حالة البوت | RUNNING | الصفقات=0 | الربح اليومي=$+0.00 | مدة التشغيل=1h 48m

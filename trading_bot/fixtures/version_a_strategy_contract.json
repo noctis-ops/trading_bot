@@ -1,0 +1,52 @@
+{
+  "fixture": "constant-indicator-long-short-v1",
+  "source_commit": "89bec19164417ca27bb40ea32cc071c8c0300d8a",
+  "decision_time": "2026-01-02T10:00:00+00:00",
+  "warmup": {"1h": 200, "15m": 200, "5m": 21},
+  "long": {
+    "gate_passed": true,
+    "should_trade": true,
+    "score": 73.0,
+    "recommendation": "good",
+    "gate_strength": 0.646,
+    "effective_score": 65.25,
+    "conditions": {
+      "1h_price_above_ema200": true,
+      "1h_ema50_above_ema200": true,
+      "15m_adx_above_25": true,
+      "15m_volume_above_sma20": true,
+      "15m_rsi_in_range_50_70": true,
+      "15m_macd_above_signal": true,
+      "15m_price_near_ema21": true
+    },
+    "stops": {
+      "stop_loss": 98.5,
+      "take_profit_1": 102.0,
+      "take_profit_2": 104.5,
+      "risk_reward_ratio": 2.1666666666666665
+    }
+  },
+  "short": {
+    "gate_passed": true,
+    "should_trade": true,
+    "score": 77.0,
+    "recommendation": "good",
+    "gate_strength": 0.23,
+    "effective_score": 59.21,
+    "conditions": {
+      "1h_price_below_ema200": true,
+      "1h_ema50_below_ema200": true,
+      "15m_adx_above_25": true,
+      "15m_volume_above_sma20": true,
+      "15m_rsi_in_range_30_50": true,
+      "15m_macd_below_signal": true,
+      "15m_price_near_ema21": true
+    },
+    "stops": {
+      "stop_loss": 99.5,
+      "take_profit_1": 96.0,
+      "take_profit_2": 93.5,
+      "risk_reward_ratio": 2.1666666666666665
+    }
+  }
+}

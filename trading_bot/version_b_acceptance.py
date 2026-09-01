@@ -1,0 +1,217 @@
+"""Machine-checkable gate required before any Version B baseline run.
+
+This command runs deterministic contract tests only.  It never downloads market
+data, runs a performance report, or writes a baseline artifact.
+
+Usage from the package directory::
+
+    python version_b_acceptance.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import tempfile
+import shutil
+from pathlib import Path
+from typing import Any
+import xml.etree.ElementTree as ET
+
+
+APP_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = APP_ROOT.parent
+MANIFEST_PATH = APP_ROOT / "VERSION_A_MANIFEST.json"
+VERSION_A_COMMIT = "89bec19164417ca27bb40ea32cc071c8c0300d8a"
+TEST_FILES = [
+    "test_version_b_config_contracts.py",
+    "test_version_b_data_semantics.py",
+    "test_version_b_strategy_freeze.py",
+    "test_version_b_risk_model.py",
+    "test_version_b_execution_lifecycle.py",
+    "test_version_b_execution_service.py",
+    "test_version_b_persistence.py",
+    "test_version_b_backtest.py",
+    "test_version_b_paper.py",
+    "test_version_b_replay_parity.py",
+    "test_version_b_order_manager.py",
+]
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _manifest_checks() -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        checks.append({"name": "manifest_parse", "passed": True})
+    except Exception as exc:
+        return [{"name": "manifest_parse", "passed": False, "reason": str(exc)}]
+
+    checks.append({
+        "name": "version_a_commit_immutable",
+        "passed": manifest.get("commit") == VERSION_A_COMMIT,
+        "reason": f"manifest commit={manifest.get('commit')!r}",
+    })
+    object_check = _git("cat-file", "-e", f"{VERSION_A_COMMIT}^{{commit}}")
+    checks.append({
+        "name": "version_a_commit_exists",
+        "passed": object_check.returncode == 0,
+        "reason": object_check.stderr.strip(),
+    })
+    ancestry = _git("merge-base", "--is-ancestor", VERSION_A_COMMIT, "HEAD")
+    checks.append({
+        "name": "version_a_is_ancestor",
+        "passed": ancestry.returncode == 0,
+        "reason": ancestry.stderr.strip(),
+    })
+
+    config_blob = _git("show", f"{VERSION_A_COMMIT}:trading_bot/config.yaml")
+    expected_hash = manifest.get("config_sha256")
+    actual_hash = hashlib.sha256(config_blob.stdout.encode()).hexdigest() if config_blob.returncode == 0 else None
+    checks.append({
+        "name": "version_a_config_hash",
+        "passed": config_blob.returncode == 0 and actual_hash == expected_hash,
+        "reason": f"expected={expected_hash}, actual={actual_hash}",
+    })
+    checks.append({
+        "name": "manifest_has_no_baseline",
+        "passed": manifest.get("measurement_status", {}).get("baseline_collected") is False,
+        "reason": "baseline_collected must remain false before this gate",
+    })
+    return checks
+
+
+def _pytest_command() -> list[str]:
+    """Select an installed test runner without assuming the system Python owns it."""
+    try:
+        import pytest  # noqa: F401
+        return [sys.executable, "-m", "pytest"]
+    except ImportError:
+        candidates = [
+            shutil.which("pytest"),
+            "/tmp/tradingbot-report-venv/bin/pytest",
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
+                return [candidate]
+    return [sys.executable, "-m", "pytest"]
+
+
+def _run_tests() -> dict[str, Any]:
+    with tempfile.NamedTemporaryFile(prefix="version-b-acceptance-", suffix=".xml") as report:
+        command = [
+            *_pytest_command(),
+            "-q",
+            *TEST_FILES,
+            f"--junitxml={report.name}",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=APP_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        result: dict[str, Any] = {
+            "command": " ".join(command),
+            "returncode": completed.returncode,
+            "passed": 0,
+            "failed": 0,
+            "errors": 0,
+            "skipped": 0,
+            "failures": [],
+        }
+        try:
+            root = ET.parse(report.name).getroot()
+            for case in root.iter("testcase"):
+                result["passed"] += 1
+                failure = case.find("failure")
+                error = case.find("error")
+                skipped = case.find("skipped")
+                if skipped is not None:
+                    result["passed"] -= 1
+                    result["skipped"] += 1
+                if failure is not None:
+                    result["passed"] -= 1
+                    result["failed"] += 1
+                    result["failures"].append({
+                        "name": f"{case.attrib.get('classname', '')}.{case.attrib.get('name', '')}",
+                        "reason": failure.attrib.get("message", failure.text or "failure"),
+                    })
+                if error is not None:
+                    result["passed"] -= 1
+                    result["errors"] += 1
+                    result["failures"].append({
+                        "name": f"{case.attrib.get('classname', '')}.{case.attrib.get('name', '')}",
+                        "reason": error.attrib.get("message", error.text or "error"),
+                    })
+        except Exception as exc:
+            result["failures"].append({"name": "junit-report", "reason": str(exc)})
+        result["stdout_tail"] = completed.stdout[-2000:]
+        result["stderr_tail"] = completed.stderr[-2000:]
+        result["passed_all"] = completed.returncode == 0 and not result["failures"]
+        return result
+
+
+def _acceptance_statuses(tests: dict[str, Any]) -> dict[str, str]:
+    """Report mandatory path and parity independently from residual unknowns."""
+    if "No module named pytest" in tests.get("stderr_tail", ""):
+        mandatory = "BLOCKED"
+    elif tests.get("passed_all"):
+        mandatory = "PASS"
+    else:
+        mandatory = "FAIL"
+    parity = mandatory if mandatory in {"PASS", "FAIL", "BLOCKED"} else "UNKNOWN"
+    return {
+        "full_version_b_path": mandatory,
+        "backtest_paper_replay_parity": parity,
+        "live_exchange_acknowledgement": "UNKNOWN",
+        "restart_exchange_reconciliation": "UNKNOWN",
+    }
+
+
+def run_gate() -> dict[str, Any]:
+    checks = _manifest_checks()
+    tests = _run_tests()
+    acceptance = _acceptance_statuses(tests)
+    all_checks_passed = all(check.get("passed", False) for check in checks)
+    passed = all_checks_passed and tests["passed_all"]
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "baseline_allowed": passed,
+        "baseline_collected": False,
+        "acceptance": acceptance,
+        "checks": checks,
+        "tests": tests,
+        "known_exceptions": [
+            "pandas may emit a non-blocking pyarrow deprecation warning",
+        ],
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json-only", action="store_true", help="emit only the JSON payload before the final status")
+    args = parser.parse_args()
+    result = run_gate()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    # The final line is intentionally machine-readable and is the only
+    # authorization signal for a subsequent baseline command.
+    print(result["status"])
+    return 0 if result["status"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

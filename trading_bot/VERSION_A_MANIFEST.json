@@ -1,0 +1,80 @@
+{
+  "version": "A",
+  "status": "immutable historical reference",
+  "commit": "89bec19164417ca27bb40ea32cc071c8c0300d8a",
+  "branch_at_audit": "arena/01a04e72-trading-bot",
+  "config_path": "trading_bot/config.yaml",
+  "config_sha256": "633a2ece9eeafc57312bf1174adfb0d55d871ef53f9c0db1b5e64a5076f98423",
+  "universe": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "DOGE/USDT"],
+  "timeframes": {
+    "decision": "15m",
+    "trend": "1h",
+    "confirmation_input": "5m",
+    "five_minute_entry_role": "non-decisional"
+  },
+  "declared_runtime": {
+    "config_environment": "paper",
+    "trading_mode_source": "TRADING_MODE environment variable; default paper",
+    "paper_initial_balance_source": "PAPER_INITIAL_BALANCE environment variable; default 10000"
+  },
+  "effective_strategy": {
+    "ema": [50, 200, 21],
+    "rsi_period": 14,
+    "rsi_long_range": [50, 70],
+    "rsi_short_range": [30, 50],
+    "macd": [12, 26, 9],
+    "adx_period": 14,
+    "adx_threshold": 25,
+    "atr_period": 14,
+    "ema21_max_distance_percent": 2.0,
+    "volume_rule": "15m volume > 20-period volume SMA; config volume_multiplier=1.5 is not active",
+    "score_weights": {"trend": 0.4, "momentum": 0.4, "volatility": 0.2},
+    "score_min_trade": 60,
+    "score_strong": 80,
+    "effective_score_formula": "score * (0.7 + 0.3 * gate_strength)",
+    "sl_tp_atr_multipliers": {"sl": 1.5, "tp1": 2.0, "tp2": 4.5},
+    "tp_allocation": {"tp1": 0.5, "tp2": 0.5},
+    "five_minute_entry_role": "non-decisional",
+    "regime_role": "direction filter only; selector does not switch to a distinct strategy",
+    "universe_policy": "config symbols, maximum five concurrent positions globally"
+  },
+  "effective_risk": {
+    "risk_percent_per_trade": 2.0,
+    "max_daily_loss_percent": 6.0,
+    "max_consecutive_losses": 3,
+    "cooldown_minutes": 60,
+    "max_leverage": 10,
+    "min_risk_reward_ratio": 2.0,
+    "move_sl_to_breakeven_after_tp1": true,
+    "close_losing_early": false
+  },
+  "execution_assumptions": {
+    "entry": "market order; strategy price is expected 15m close, not guaranteed fill",
+    "monitoring": "polling loop, configured interval 60 seconds, ticker-based local monitoring",
+    "paper_fee": 0.0004,
+    "paper_slippage": 0.0002,
+    "paper_leverage": "hardcoded 10x, not RiskManager dynamic leverage",
+    "paper_intrabar": "ticker close only; no historical high/low sequence",
+    "live_protection": "SL/TP placement attempted after market fill but not critical in current code",
+    "backtest": "1h loop, divergent sizing/exits, close-based exit, no fees/slippage/funding"
+  },
+  "known_defects_at_freeze": [
+    "Independent iloc[-2] selection without one decision timestamp or freshness contract",
+    "Warm-up policy is not valid per indicator/timeframe",
+    "Indicator implementations diverge between data, indicators, and backtest modules",
+    "Backtest runs at 1h cadence and contains future/current-candle and divergent execution semantics",
+    "Paper TP1 can retrigger, uses fixed leverage, and its balance/PnL records do not match OrderManager accounting",
+    "Live protection placement is non-critical and Live TP1 does not reliably recreate TP2",
+    "Sizing logic exists in both Strategy and RiskManager; main bot and Backtest use different paths",
+    "Daily loss/consecutive loss state is in memory and partial exits are treated as independent results",
+    "Local order/position state is not fully reconciled or hydrated after restart",
+    "Database is best-effort and lacks a durable lifecycle/event/fill journal",
+    "Telegram command authorization is incomplete",
+    "Existing tests are smoke/shape tests and have not established parity or statistical validity"
+  ],
+  "measurement_status": {
+    "functional_tests_run_for_this_manifest": false,
+    "statistical_validation": false,
+    "baseline_collected": false
+  }
+}

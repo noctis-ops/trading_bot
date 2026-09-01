@@ -21,6 +21,8 @@ from pathlib import Path
 
 import yaml
 from utils.logger import logger
+from core.risk_model import FillLeg
+from core.trade_lifecycle import TradeLifecycle
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -61,6 +63,11 @@ class PaperTradingExchange:
             initial_balance: الرصيد الوهمي الأولي بالـ USDT
         """
         # ── تهيئة الحالة ──────────────────────────────
+        execution_cfg = config.get('execution', {})
+        risk_cfg = config.get('risk_management', {})
+        self.TAKER_FEE = float(execution_cfg.get('fee_rate', self.TAKER_FEE))
+        self.SLIPPAGE = float(execution_cfg.get('slippage_rate', self.SLIPPAGE))
+        self.MAX_LEVERAGE = int(risk_cfg.get('max_leverage', self.MAX_LEVERAGE))
         self.initial_balance = initial_balance
         self.use_testnet     = False
         self.environment     = "PAPER TRADING 📝 (آمن — بدون أموال حقيقية)"
@@ -71,8 +78,10 @@ class PaperTradingExchange:
         # الصفقات المفتوحة حالياً: {symbol → position_dict}
         self._positions: Dict[str, dict] = {}
 
-        # سجل جميع الصفقات المغلقة
+        # سجل أحداث التنفيذ.  Partial exits remain under one trade_id.
         self.trade_history: List[dict] = []
+        self._lifecycles: Dict[str, TradeLifecycle] = {}
+        self._leverage_by_symbol: Dict[str, int] = {}
 
         # عداد API calls للـ rate limiting
         self.last_api_call  = 0.0
@@ -206,7 +215,11 @@ class PaperTradingExchange:
     # ═══════════════════════════════════════════════════
 
     def set_leverage(self, symbol: str, leverage: int):
-        """تسجيل الرافعة (محلياً فقط)"""
+        """Register the leverage used by the next position on ``symbol``."""
+        leverage = int(leverage)
+        if leverage < 1 or leverage > self.MAX_LEVERAGE:
+            raise ValueError(f"leverage must be between 1 and {self.MAX_LEVERAGE}")
+        self._leverage_by_symbol[symbol] = leverage
         logger.debug(f"📌 [Paper] رافعة {symbol}: {leverage}x")
 
     def set_margin_type(self, symbol: str, margin_type: str = 'isolated'):
@@ -255,6 +268,12 @@ class PaperTradingExchange:
         timestamp = int(datetime.utcnow().timestamp() * 1000)
 
         existing = self._positions.get(symbol)
+        requested_event = (params or {}).get('event_type', 'MANUAL_EXIT')
+        allowed_events = {
+            'TAKE_PROFIT_1', 'TAKE_PROFIT_2', 'STOP_LOSS',
+            'REVERSAL_EXIT', 'EMERGENCY_EXIT', 'END_OF_DATA', 'MANUAL_EXIT',
+        }
+        event_type = requested_event if requested_event in allowed_events else 'MANUAL_EXIT'
 
         # ═══════════════════════════════════════════════
         # فتح صفقة جديدة (لا توجد صفقة على هذا الرمز بعد)
@@ -262,8 +281,9 @@ class PaperTradingExchange:
         if existing is None:
             side_label = 'long' if side == 'buy' else 'short'
 
-            # الهامش = Notional / Leverage (نستخدم 10x كافتراضي)
-            margin = notional / self.MAX_LEVERAGE
+            # الهامش = Notional / الرافعة المسجلة (10x فقط كـ intentional default)
+            leverage = self._leverage_by_symbol.get(symbol, self.MAX_LEVERAGE)
+            margin = notional / leverage
 
             if margin + fee > self._usdt_balance:
                 logger.warning(
@@ -276,9 +296,18 @@ class PaperTradingExchange:
             # حجز الهامش والرسوم من الرصيد
             self._usdt_balance -= (margin + fee)
 
+            # Durable lifecycle identity begins at the entry fill.
+            trade_id = f"PAPER-{uuid.uuid4().hex[:12].upper()}"
+            lifecycle = TradeLifecycle(trade_id, symbol, side_label)
+            lifecycle.record_entry_fill(
+                FillLeg('entry', side_label, fill_price, amount, fee=fee)
+            )
+            self._lifecycles[trade_id] = lifecycle
+
             # تسجيل الصفقة المفتوحة (بالاتجاه الصحيح)
             self._positions[symbol] = {
                 'symbol':        symbol,
+                'trade_id':       trade_id,
                 'side':          side_label,
                 'entry_price':   fill_price,
                 'amount':        amount,
@@ -287,10 +316,11 @@ class PaperTradingExchange:
                 'notional':      notional,
                 'margin_locked': margin,
                 'fee_entry':     fee,
-                'leverage':      self.MAX_LEVERAGE,
+                'leverage':      leverage,
                 'stop_loss':     None,
                 'take_profit_1': None,
                 'take_profit_2': None,
+                'tp1_hit':       False,
                 'opened_at':     datetime.utcnow().isoformat(),
             }
 
@@ -334,6 +364,13 @@ class PaperTradingExchange:
                 raw_pnl = (pos['entry_price'] - fill_price) * close_amount
             net_pnl = raw_pnl - exit_fee
 
+            lifecycle = self._lifecycles.get(pos.get('trade_id'))
+            if lifecycle is not None:
+                lifecycle.record_exit_fill(
+                    FillLeg('exit', pos['side'], fill_price, close_amount, fee=exit_fee),
+                    event_type,
+                )
+
             # تحرير الهامش بنسبة الكمية المغلقة من إجمالي الصفقة
             margin_ratio  = close_amount / pos['amount']
             margin_release = pos['margin_locked'] * margin_ratio
@@ -346,6 +383,9 @@ class PaperTradingExchange:
                 **pos,
                 'exit_price':     fill_price,
                 'exit_fee':       exit_fee,
+                'trade_id':       pos.get('trade_id'),
+                'event_type':     event_type,
+                'exit_reason':    event_type,
                 'pnl':            net_pnl,
                 'pnl_pct':        pnl_pct,
                 'closed_at':      datetime.utcnow().isoformat(),
@@ -358,7 +398,7 @@ class PaperTradingExchange:
                 symbol, pos['side'],
                 pos['entry_price'], fill_price,
                 net_pnl, pnl_pct,
-                'PAPER_MARKET'
+                event_type
             )
 
             # ── الإغلاق الكامل: إزالة الصفقة ──────────
@@ -377,6 +417,7 @@ class PaperTradingExchange:
 
         return {
             'id':        order_id,
+            'trade_id':  (self._positions.get(symbol) or existing or {}).get('trade_id'),
             'symbol':    symbol,
             'side':      side,
             'amount':    amount,
@@ -446,6 +487,29 @@ class PaperTradingExchange:
             'stopPrice': stop_price,
             'status':    'registered',
         }
+
+    def record_protection(self, symbol: str) -> bool:
+        """Record the completed protection set after SL and both TPs exist."""
+        pos = self._positions.get(symbol)
+        if not pos or not pos.get('stop_loss') or not pos.get('take_profit_1') or not pos.get('take_profit_2'):
+            return False
+        lifecycle = self._lifecycles.get(pos.get('trade_id'))
+        if lifecycle is None:
+            return False
+        if not any(event.event_type == 'PROTECTION_PLACED' for event in lifecycle.events):
+            lifecycle.record_management_event(
+                'PROTECTION_PLACED',
+                {
+                    'stop_loss': pos['stop_loss'],
+                    'take_profit_1': pos['take_profit_1'],
+                    'take_profit_2': pos['take_profit_2'],
+                },
+            )
+        return True
+
+    def get_lifecycle(self, trade_id: str) -> Optional[TradeLifecycle]:
+        """Return the complete entry-to-close lifecycle for audit/reconciliation."""
+        return self._lifecycles.get(trade_id)
 
     def cancel_order(self, symbol: str, order_id: str) -> Dict:
         """إلغاء أمر مسجَّل"""
@@ -553,7 +617,7 @@ class PaperTradingExchange:
                         reason = 'STOP_LOSS'
                     elif tp2 and current_price <= tp2:
                         reason = 'TAKE_PROFIT_2'
-                    elif tp1 and current_price <= tp1:
+                    elif tp1 and current_price <= tp1 and not pos.get('tp1_hit', False):
                         reason = 'TAKE_PROFIT_1'
                 else:
                     # Long: SL تحت الدخول، TP فوق الدخول
@@ -561,7 +625,7 @@ class PaperTradingExchange:
                         reason = 'STOP_LOSS'
                     elif tp2 and current_price >= tp2:
                         reason = 'TAKE_PROFIT_2'
-                    elif tp1 and current_price >= tp1:
+                    elif tp1 and current_price >= tp1 and not pos.get('tp1_hit', False):
                         reason = 'TAKE_PROFIT_1'
 
                 if reason:
@@ -578,7 +642,8 @@ class PaperTradingExchange:
                         #  مع نقل SL إلى نقطة التعادل بعد TP1)
                         half_size = round(pos['amount'] * 0.5, 6)
                         order = self.create_market_order(
-                            symbol, close_side, half_size
+                            symbol, close_side, half_size,
+                            params={'event_type': reason},
                         )
 
                         # إذا أُغلقت النصف بنجاح وما زالت الصفقة موجودة
@@ -588,6 +653,11 @@ class PaperTradingExchange:
                             remaining['stop_loss']    = pos['entry_price']
                             remaining['tp1_hit']      = True
                             remaining['sl_moved_to_be'] = True
+                            lifecycle = self._lifecycles.get(remaining.get('trade_id'))
+                            if lifecycle is not None:
+                                lifecycle.record_management_event(
+                                    'BE_UPDATED', {'stop_loss': remaining['stop_loss']}
+                                )
                             logger.info(
                                 f"🔄 [Paper] Breakeven بعد TP1 | {symbol} | "
                                 f"SL الجديد = ${pos['entry_price']:,.2f}"
@@ -595,12 +665,15 @@ class PaperTradingExchange:
                     else:
                         # SL / TP2 → إغلاق كامل للصفقة المتبقية
                         order = self.create_market_order(
-                            symbol, close_side, pos['amount']
+                            symbol, close_side, pos['amount'],
+                            params={'event_type': reason},
                         )
 
                     triggered.append({
                         'symbol': symbol,
+                        'trade_id': pos.get('trade_id'),
                         'reason': reason,
+                        'event_type': reason,
                         'price':  current_price,
                         'order':  order,
                     })
@@ -631,7 +704,13 @@ class PaperTradingExchange:
                 'open_positions':   len(self._positions),
             }
 
-        pnls   = [t['pnl'] for t in self.trade_history]
+        # ``trade_history`` is an event journal.  Aggregate partial exits by
+        # trade_id so TP1 and TP2 cannot be counted as two trades.
+        lifecycle_pnls: Dict[str, float] = {}
+        for index, event in enumerate(self.trade_history):
+            trade_id = event.get('trade_id') or f'legacy-event-{index}'
+            lifecycle_pnls[trade_id] = lifecycle_pnls.get(trade_id, 0.0) + float(event.get('pnl', 0.0))
+        pnls   = list(lifecycle_pnls.values())
         wins   = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p <= 0]
 
@@ -651,10 +730,10 @@ class PaperTradingExchange:
             'current_balance':  current_bal,
             'total_pnl':        total_pnl,
             'roi_pct':          total_pnl / self.initial_balance * 100,
-            'total_trades':     len(self.trade_history),
+            'total_trades':     len(pnls),
             'winning_trades':   len(wins),
             'losing_trades':    len(losses),
-            'win_rate_pct':     len(wins) / len(self.trade_history) * 100,
+            'win_rate_pct':     len(wins) / len(pnls) * 100 if pnls else 0.0,
             'avg_win':          sum(wins)   / len(wins)   if wins   else 0,
             'avg_loss':         sum(losses) / len(losses) if losses else 0,
             'profit_factor':    profit_factor,

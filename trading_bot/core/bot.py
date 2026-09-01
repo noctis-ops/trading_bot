@@ -81,6 +81,9 @@ from core.market_regime import (
 )
 from core.strategy_selector import StrategySelector
 from core.pair_selector import is_pair_correlated_with_open
+from core.risk_engine import RiskEngine
+from core.strategy_core import StrategyCore
+from core.version_b_paper import VersionBPaperEngine
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -150,6 +153,13 @@ class TradingBot:
         order_manager = None,
         trade_logger  = None,
         notifier      = None,
+        version_b: bool = False,
+        version_b_engine = None,
+        version_b_store = None,
+        version_b_run_id: str | None = None,
+        version_b_initial_balance: float = 10_000.0,
+        version_b_fee_rate: float | None = None,
+        version_b_slippage_rate: float | None = None,
     ):
         """
         تهيئة TradingBot.
@@ -171,6 +181,32 @@ class TradingBot:
                     trade_logger = TradeLogger()      ← تسجيل دائم (SQLite)
                     notifier     = TelegramNotifier(get_bot=lambda: self)
         """
+        self.version_b = bool(version_b)
+        if self.version_b:
+            # Explicit deterministic B path: no exchange is constructed and no
+            # Binance/network call can occur. MarketData must be injected so
+            # the caller owns the finite fixture/snapshot supplied to replay.
+            if market_data is None:
+                raise ValueError("version_b=True requires injected market_data; network access is forbidden")
+            self.exchange = exchange
+            self.market_data = market_data
+            self.strategy_core = StrategyCore(
+                strategy=strategy if isinstance(strategy, TradingStrategy) else strategy,
+                risk_engine=RiskEngine(),
+            )
+            self.version_b_engine = version_b_engine or VersionBPaperEngine(
+                initial_balance=version_b_initial_balance,
+                strategy_core=self.strategy_core,
+                fee_rate=version_b_fee_rate,
+                slippage_rate=version_b_slippage_rate,
+                store=version_b_store,
+                run_id=version_b_run_id,
+            )
+            self.strategy = self.strategy_core.strategy
+            self.risk_engine = self.strategy_core.risk_engine
+            self._version_b_last_report = None
+            return
+
         if not self.SYMBOLS:
             raise ValueError(
                 "❌ trading.symbols فارغة في config.yaml — لا يوجد ما يُتداول عليه"
@@ -238,6 +274,33 @@ class TradingBot:
     # حلقة التداول الرئيسية
     # ═══════════════════════════════════════════════════
 
+    def run_version_b_once(
+        self,
+        *,
+        symbol: str = "BTC/USDT",
+        direction: str = "long",
+    ):
+        """Run one explicit B cycle through MarketData → StrategyCore → Paper.
+
+        This method is intentionally finite and deterministic. It is the
+        network-free TradingBot entry point for acceptance fixtures; live
+        polling remains the legacy path until the B operational adapter is
+        separately accepted.
+        """
+        if not self.version_b:
+            raise RuntimeError("run_version_b_once requires TradingBot(version_b=True)")
+        frames = {
+            "1h": self.market_data.get_complete_dataframe(symbol, self.TREND_TIMEFRAME),
+            "15m": self.market_data.get_complete_dataframe(symbol, self.MAIN_TIMEFRAME),
+            "5m": self.market_data.get_complete_dataframe(symbol, self.CONFIRMATION_TIMEFRAME),
+        }
+        self._version_b_last_report = self.version_b_engine.run(
+            frames["1h"], frames["15m"], frames["5m"],
+            symbol=symbol,
+            direction=direction,
+        )
+        return self._version_b_last_report
+
     def run(self, max_iterations: Optional[int] = None):
         """
         بدء حلقة التداول الرئيسية — تعمل حتى الإيقاف اليدوي (Ctrl+C)
@@ -249,6 +312,9 @@ class TradingBot:
                              يُستخدم فقط من test_bot.py للاختبار الآلي —
                              لا يظهر أبداً في الاستخدام الحقيقي عبر main.py.
         """
+        if self.version_b:
+            return self.run_version_b_once()
+
         self.is_running      = True
         self._stop_requested = False
         self.start_time      = datetime.utcnow()

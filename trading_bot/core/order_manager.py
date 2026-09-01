@@ -207,26 +207,35 @@ class OrderManager:
 
             # ── الخطوة 3: Stop Loss ───────────────────────
             sl_order = self._place_stop_loss(symbol, sl_price, contract_size)
-            if sl_order:
-                orders_placed['stop_loss'] = sl_order
+            if not sl_order:
+                raise RuntimeError('LIVE BLOCKER: stop-loss placement/confirmation failed')
+            orders_placed['stop_loss'] = sl_order
 
             # ── الخطوة 4: Take Profit 1 (50%) ───────────
             size_tp1   = round(contract_size * 0.5, 6)
             tp1_order  = self._place_take_profit(symbol, tp1_price, size_tp1, label='TP1')
-            if tp1_order:
-                orders_placed['take_profit_1'] = tp1_order
+            if not tp1_order:
+                raise RuntimeError('take-profit-1 placement/confirmation failed')
+            orders_placed['take_profit_1'] = tp1_order
 
             # ── الخطوة 5: Take Profit 2 (50% المتبقي) ───
             size_tp2   = contract_size - size_tp1
             tp2_order  = self._place_take_profit(symbol, tp2_price, size_tp2, label='TP2')
-            if tp2_order:
-                orders_placed['take_profit_2'] = tp2_order
+            if not tp2_order:
+                raise RuntimeError('take-profit-2 placement/confirmation failed')
+            orders_placed['take_profit_2'] = tp2_order
+
+            if hasattr(self.exchange, 'record_protection') and not self.exchange.record_protection(symbol):
+                raise RuntimeError('LIVE BLOCKER: protection set was not confirmed')
 
             # ── الخطوة 6: تسجيل الصفقة ───────────────────
             position_state = {
                 'symbol':        symbol,
                 'side':          'long',
                 'entry_price':   fill_price,
+                'entry_fee':      float(market_order.get('fee', 0.0)),
+                'entry_fee_charged': False,
+                'trade_id':       market_order.get('trade_id'),
                 'contract_size': contract_size,
                 'leverage':      leverage,
                 'stop_loss':     sl_price,
@@ -358,30 +367,39 @@ class OrderManager:
 
             # ── Stop Loss (فوق الدخول) ──────────────────
             sl_order = self._place_stop_loss(symbol, sl_price, contract_size, side='short')
-            if sl_order:
-                orders_placed['stop_loss'] = sl_order
+            if not sl_order:
+                raise RuntimeError('LIVE BLOCKER: stop-loss placement/confirmation failed')
+            orders_placed['stop_loss'] = sl_order
 
             # ── Take Profit 1 (50%) — تحت الدخول ────────
             size_tp1  = round(contract_size * 0.5, 6)
             tp1_order = self._place_take_profit(
                 symbol, tp1_price, size_tp1, label='TP1', side='short'
             )
-            if tp1_order:
-                orders_placed['take_profit_1'] = tp1_order
+            if not tp1_order:
+                raise RuntimeError('take-profit-1 placement/confirmation failed')
+            orders_placed['take_profit_1'] = tp1_order
 
             # ── Take Profit 2 (50% المتبقي) ─────────────
             size_tp2  = contract_size - size_tp1
             tp2_order = self._place_take_profit(
                 symbol, tp2_price, size_tp2, label='TP2', side='short'
             )
-            if tp2_order:
-                orders_placed['take_profit_2'] = tp2_order
+            if not tp2_order:
+                raise RuntimeError('take-profit-2 placement/confirmation failed')
+            orders_placed['take_profit_2'] = tp2_order
+
+            if hasattr(self.exchange, 'record_protection') and not self.exchange.record_protection(symbol):
+                raise RuntimeError('LIVE BLOCKER: protection set was not confirmed')
 
             # ── تسجيل الصفقة ────────────────────────────
             position_state = {
                 'symbol':        symbol,
                 'side':          'short',
                 'entry_price':   fill_price,
+                'entry_fee':      float(market_order.get('fee', 0.0)),
+                'entry_fee_charged': False,
+                'trade_id':       market_order.get('trade_id'),
                 'contract_size': contract_size,
                 'leverage':      leverage,
                 'stop_loss':     sl_price,
@@ -471,7 +489,8 @@ class OrderManager:
             close_side = self._closing_side(position['side'])
             close_order = self._execute_with_retry(
                 fn          = lambda: self.exchange.create_market_order(
-                    symbol, close_side, size_to_close
+                    symbol, close_side, size_to_close,
+                    params={'event_type': reason},
                 ),
                 description = f"Market {close_side.upper()} {symbol} ({reason})",
                 critical    = True,
@@ -490,12 +509,21 @@ class OrderManager:
                     exit_price = float(position['entry_price'])
 
             # ── حساب الـ PnL ──────────────────────────────
-            pnl, pnl_pct = self._calculate_pnl(
+            pnl, _ = self._calculate_pnl(
                 entry_price  = position['entry_price'],
                 exit_price   = exit_price,
                 contract_size = size_to_close,
                 side         = position['side'],
             )
+            # Deduct executed-fill fees once.  Entry fee is charged only on
+            # the first exit event of this lifecycle.
+            exit_fee = float(close_order.get('fee', 0.0))
+            entry_fee = (
+                float(position.get('entry_fee', 0.0))
+                if not position.get('entry_fee_charged', False) else 0.0
+            )
+            pnl -= entry_fee + exit_fee
+            pnl_pct = pnl / (position['entry_price'] * size_to_close) * 100 if size_to_close else 0.0
 
             # ── تسجيل النتيجة في RiskManager ─────────────
             self.risk_manager.register_trade_result(
@@ -522,6 +550,8 @@ class OrderManager:
                 'closed_at':   datetime.utcnow().isoformat(),
             }
             self.closed_positions.append(closed_record)
+            if symbol in self.open_positions:
+                self.open_positions[symbol]['entry_fee_charged'] = True
 
             if partial_size is None:
                 # إغلاق كامل
@@ -620,12 +650,17 @@ class OrderManager:
                 # (يُطابق تصميم الاستراتيجية ويُوازي سلوك live: يُغلق 50%
                 #  ويُبقي 50% مع نقل SL إلى Breakeven)
                 half_size = round(pos['contract_size'] * 0.5, 6)
-                pnl, pnl_pct = self._calculate_pnl(
+                pnl, _ = self._calculate_pnl(
                     entry_price   = pos['entry_price'],
                     exit_price    = price,
                     contract_size = half_size,
                     side          = pos['side'],
                 )
+                close_order = event.get('order') or {}
+                pnl -= float(close_order.get('fee', 0.0))
+                if not pos.get('entry_fee_charged', False):
+                    pnl -= float(pos.get('entry_fee', 0.0))
+                pnl_pct = pnl / (pos['entry_price'] * half_size) * 100 if half_size else 0.0
 
                 self.risk_manager.register_trade_result(
                     symbol    = sym,
@@ -658,6 +693,7 @@ class OrderManager:
                     self.pending_orders.pop(sym, None)
                 else:
                     self.open_positions[sym]['contract_size']  = remaining
+                    self.open_positions[sym]['entry_fee_charged'] = True
                     self.open_positions[sym]['tp1_hit']        = True
                     self.open_positions[sym]['stop_loss']      = pos['entry_price']
                     self.open_positions[sym]['sl_moved_to_be'] = True
@@ -667,12 +703,17 @@ class OrderManager:
                 continue
 
             # ══ إغلاق كامل (SL / TP2) ══
-            pnl, pnl_pct = self._calculate_pnl(
+            pnl, _ = self._calculate_pnl(
                 entry_price   = pos['entry_price'],
                 exit_price    = price,
                 contract_size = pos['contract_size'],
                 side          = pos['side'],
             )
+            close_order = event.get('order') or {}
+            pnl -= float(close_order.get('fee', 0.0))
+            if not pos.get('entry_fee_charged', False):
+                pnl -= float(pos.get('entry_fee', 0.0))
+            pnl_pct = pnl / (pos['entry_price'] * pos['contract_size']) * 100 if pos['contract_size'] else 0.0
 
             self.risk_manager.register_trade_result(
                 symbol    = sym,
@@ -955,7 +996,7 @@ class OrderManager:
                 symbol, self._closing_side(side), amount, sl_price
             ),
             description = f"SL @ ${sl_price:,.2f} ({side})",
-            critical    = False,   # غير حرج — الصفقة مفتوحة بالفعل
+            critical    = True,    # no position without confirmed protection
         )
 
     def _place_take_profit(

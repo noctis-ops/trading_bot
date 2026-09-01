@@ -49,6 +49,16 @@ from indicators.volatility import (
     get_volatility_regime,
     get_volatility_regime_label,
 )
+from core.risk_model import (
+    FillLeg,
+    PlannedRisk,
+    PositionRiskInput,
+    calculate_daily_loss,
+    calculate_equity,
+    calculate_planned_risk,
+    calculate_portfolio_risk_at_stop,
+    calculate_realized_net_pnl,
+)
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -662,6 +672,70 @@ class RiskManager:
             return round(self.MAX_LEVERAGE * lev_factor, 1)
         except Exception:
             return float(self.MAX_LEVERAGE)
+
+    # ═══════════════════════════════════════════════════
+    # Version B — canonical accounting definitions
+    # ═══════════════════════════════════════════════════
+
+    @staticmethod
+    def calculate_equity(
+        wallet_value: float,
+        margin_used: float,
+        unrealized_pnl: float,
+        accrued_costs: float = 0.0,
+    ) -> float:
+        """Canonical Equity; it is not free balance, margin, or notional."""
+        return calculate_equity(wallet_value, margin_used, unrealized_pnl, accrued_costs)
+
+    @staticmethod
+    def calculate_planned_risk(
+        *,
+        side: str,
+        entry_price: float,
+        stop_price: float,
+        quantity: float,
+        equity: float,
+        fee_rate: float = 0.0,
+        stop_slippage_rate: float = 0.0,
+    ) -> PlannedRisk:
+        """Canonical modeled initial-stop risk from actual entry fill."""
+        return calculate_planned_risk(
+            side=side,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            quantity=quantity,
+            equity=equity,
+            fee_rate=fee_rate,
+            stop_slippage_rate=stop_slippage_rate,
+        )
+
+    @staticmethod
+    def calculate_realized_net_pnl(fills, *, funding: float = 0.0) -> float:
+        """Canonical net lifecycle PnL from entry/exit fills."""
+        return calculate_realized_net_pnl(fills, funding=funding)
+
+    @staticmethod
+    def calculate_daily_loss(start_of_day_equity: float, current_equity: float) -> float:
+        """Canonical daily loss based on equity, not free balance."""
+        return calculate_daily_loss(start_of_day_equity, current_equity)
+
+    @staticmethod
+    def calculate_portfolio_risk_at_stop(
+        positions,
+        *,
+        candidate=None,
+        equity: float,
+        fee_rate: float = 0.0,
+        stop_slippage_rate: float = 0.0,
+    ) -> float:
+        """Canonical aggregate risk-at-stop for current positions/candidate."""
+        return calculate_portfolio_risk_at_stop(
+            positions,
+            candidate=candidate,
+            equity=equity,
+            fee_rate=fee_rate,
+            stop_slippage_rate=stop_slippage_rate,
+        )
 
     # ═══════════════════════════════════════════════════
     # ⑤ التحقق من إذن التداول

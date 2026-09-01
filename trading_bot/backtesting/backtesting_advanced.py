@@ -34,6 +34,7 @@ import json
 from utils.logger import logger
 from core.strategy import TradingStrategy
 from data.market_data import MarketData
+from backtesting.version_b_backtest import VersionBBacktestEngine
 
 
 class AdvancedBacktestingEngine:
@@ -359,7 +360,60 @@ class AdvancedBacktestingEngine:
         return slice_df.iloc[-n_candles:]
 
     # ═══════════════════════════════════════════════════
-    # حلقة Backtesting الرئيسية
+    # Version B backtest adapter
+    # ═══════════════════════════════════════════════════
+
+    def backtest_version_b(
+        self,
+        df_1h: pd.DataFrame,
+        df_15m: pd.DataFrame,
+        df_5m: pd.DataFrame,
+        symbol: str = 'BTC/USDT',
+        direction: str = 'long',
+    ) -> Dict:
+        """Run the canonical Version B simulator.
+
+        The legacy ``backtest`` method remains available for Version A result
+        reproduction.  Historical Version B baselines must call this explicit
+        adapter so the execution model and clock are present in the report.
+        """
+        engine = VersionBBacktestEngine(
+            initial_balance=self.initial_balance,
+            strategy=self.strategy,
+        )
+        report = engine.run(
+            df_1h,
+            df_15m,
+            df_5m,
+            symbol=symbol,
+            direction=direction,
+        )
+        self.service = engine.service
+        self.signals = engine.signals
+        self.equity_curve = engine.equity_curve
+        self.timestamps = engine.timestamps
+        self.current_balance = engine.service.equity()
+        self.positions = {
+            name: {
+                'symbol': position.symbol,
+                'side': position.side,
+                'entry_price': position.entry_price,
+                'contract_size': position.remaining_quantity,
+                'stop_loss': position.stop_loss,
+                'take_profit_1': position.take_profit_1,
+                'take_profit_2': position.take_profit_2,
+                'trade_id': position.lifecycle.trade_id,
+            }
+            for name, position in engine.service.positions.items()
+        }
+        self.trades = report.get('trades', [])
+        self.total_trades = report.get('total_trades', 0)
+        self.winning_trades = report.get('winning_trades', 0)
+        self.losing_trades = report.get('losing_trades', 0)
+        return report
+
+    # ═══════════════════════════════════════════════════
+    # حلقة Backtesting Version A (legacy reproduction)
     # ═══════════════════════════════════════════════════
 
     def backtest(

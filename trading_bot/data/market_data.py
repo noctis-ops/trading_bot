@@ -18,6 +18,11 @@ import yaml
 import time
 
 from utils.logger import logger
+from data.time_alignment import (
+    AlignedFrames,
+    align_timeframes,
+    derive_warmup_requirements,
+)
 
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
@@ -43,6 +48,9 @@ class MarketData:
     4. تخزين البيانات مؤقتاً (caching)
     5. تحديث البيانات تلقائياً
     """
+
+    # Version B data contract: cache duration remains the current 60 seconds.
+    CACHE_TTL_SECONDS = 60
 
     def __init__(self, exchange):
         """
@@ -129,7 +137,7 @@ class MarketData:
         cache_key = f"{symbol}_{timeframe}"
 
         if use_cache and cache_key in self.cache:
-            if time.time() - self.last_fetch.get(cache_key, 0) < 60:
+            if time.time() - self.last_fetch.get(cache_key, 0) < self.CACHE_TTL_SECONDS:
                 logger.debug(f"📦 استخدام cache: {cache_key}")
                 return self.cache[cache_key]
 
@@ -335,6 +343,60 @@ class MarketData:
         if df.empty:
             return df
         return self.add_indicators(df)
+
+    def get_aligned_complete_dataframes(
+        self,
+        symbol: str,
+        decision_time=None,
+        limit: int = None,
+    ) -> AlignedFrames:
+        """Fetch and align the three configured frames to one decision time.
+
+        This is an additive Version B API. Existing callers retain the legacy
+        ``get_complete_dataframe``/``iloc[-2]`` behavior until the bot and
+        replay adapters are migrated in later phases.
+        """
+        trading = config.get('trading', {})
+        timeframes = {
+            '1h': trading.get('trend_timeframe', '1h'),
+            '15m': trading.get('main_timeframe', '15m'),
+            '5m': trading.get('confirmation_timeframe', '5m'),
+        }
+        frames = {
+            key: self.get_complete_dataframe(symbol, timeframe, limit=limit)
+            for key, timeframe in timeframes.items()
+        }
+        warmup = derive_warmup_requirements(config)
+        # The quality contract uses canonical keys (1h/15m/5m).  The current
+        # config values are those keys; custom timeframes are still retained
+        # in the returned mapping but receive no implicit strategy decision.
+        return align_timeframes(
+            frames,
+            decision_time=decision_time,
+            decision_timeframe='15m',
+            warmup=warmup,
+        )
+
+    def get_data_quality(
+        self,
+        symbol: str,
+        decision_time=None,
+        limit: int = None,
+    ) -> dict:
+        """Return structured quality statuses without evaluating strategy."""
+        aligned = self.get_aligned_complete_dataframes(symbol, decision_time, limit)
+        return {
+            timeframe: {
+                'status': quality.status.value,
+                'required_rows': quality.required_rows,
+                'available_rows': quality.available_rows,
+                'latest_open': quality.latest_open.isoformat() if quality.latest_open is not None else None,
+                'latest_close': quality.latest_close.isoformat() if quality.latest_close is not None else None,
+                'gap_count': quality.gap_count,
+                'stale_by_seconds': quality.stale_by_seconds,
+            }
+            for timeframe, quality in aligned.quality.items()
+        }
 
     def get_last_closed_candle(
         self,

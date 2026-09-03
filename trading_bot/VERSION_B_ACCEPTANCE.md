@@ -4,20 +4,32 @@ This document defines the machine-checkable gate required before any Historical 
 
 ## Current remediation gate record
 
-As of 2026-09-01, the automated gate reports **PASS** with 50 mandatory
-assertions passed, 0 failed, 0 errors, 0 skipped, and one non-blocking pandas
-PyArrow deprecation warning. `baseline_collected` remains `false`.
+As of 2026-09-03, the automated gate reports 68 mandatory assertions passed,
+0 failed, 0 errors, 0 skipped. `baseline_collected` remains `false`. The gate's
+final line depends on the immutable Version A object checks as well, so it
+requires a clone that actually contains commit `89bec19`.
 
 | Acceptance surface | Status | Evidence / limitation |
 |---|---|---|
 | Full Version B path | `PASS` | Deterministic gate suite, including explicit TradingBot B wiring |
 | Backtest ↔ Paper replay parity | `PASS` | Shared replay engine and identical decision/lifecycle fixture |
-| Runtime/exchange protection acknowledgement | `UNKNOWN` | Network-free acceptance intentionally does not claim exchange evidence |
-| Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction is covered; live exchange hydration is not |
+| External execution contract | `PASS` | Computed from `WriteAheadAndIdentityTests`, `FailureAccountingTests`, `StoreContractTests`: write-ahead intent, retry identity, lost response, `UNKNOWN`, partial fill, rejection, terminal-state guard |
+| Restart recovery contract | `PASS` | Computed from `RestartRecoveryTests`: offline fill, crash between fill and event, unresolved reporting, vanished resting stop, idempotent re-recovery, hydrated accounting |
+| Runtime/exchange protection acknowledgement | `UNKNOWN` | Requires a real venue: create → fetch/ack confirmation and `clientOrderId` deduplication |
+| Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction and deterministic reconciliation are covered; a live-account restart drill is not |
 
-Statuses are intentionally reported separately as `PASS`, `FAIL`, `BLOCKED`, or
-`UNKNOWN`; a residual `UNKNOWN` outside the mandatory deterministic path does
-not authorize Live.
+The four `PASS` rows are computed from the junit report per test group. The two
+`UNKNOWN` rows are `UNKNOWN` by construction: a network-free gate never infers
+exchange evidence, and the gate publishes the evidence each one requires under
+`residual_unknowns`. A residual `UNKNOWN` does not authorize Live.
+
+**Negative control.** Forcing `NOT_FOUND` to resolve as `ACCEPTED` in
+`core/external_execution.py` turns `external_execution_contract` and
+`restart_recovery_contract` to `FAIL` with three named tests, so these surfaces
+are not vacuous.
+
+See `VERSION_B_EXTERNAL_EXECUTION.md` for the contract itself and the explicit
+split between double-proven behavior and required exchange evidence.
 
 ## Required result
 
@@ -38,6 +50,8 @@ The gate must report exactly:
 - Paper: deterministic replay, accounting reconciliation, leverage semantics, lifecycle parity.
 - Parity: same event stream produces equivalent strategy decision and lifecycle state behavior.
 - Reports: chronological order, lifecycle aggregation, gross/net/cost separation, open positions separated.
+- External execution: write-ahead intent, retry identity, lost response, `UNKNOWN`, partial fill, rejection, unconfirmed protection, terminal-state guard.
+- Restart recovery: reconciliation of every non-terminal intent, offline fills, dropped-event derivation, idempotent re-recovery, hydrated accounting, unresolved reporting.
 
 No baseline is allowed before this document is satisfied by the automated
 command below. The command is deterministic and does not download market data

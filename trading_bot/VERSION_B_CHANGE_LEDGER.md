@@ -206,6 +206,109 @@ after the initial component implementation.
   one non-blocking PyArrow warning; `baseline_collected=false`.
 - **Status:** implemented and verified
 
+### VB-EXEC-003 — External execution intent contract
+
+- **Phase:** External Execution + Restart Recovery
+- **Category / severity:** Safety / Execution / Critical
+- **Component:** `core/external_execution.py`
+- **Observable change:** Orders to an external venue now go through a durable,
+  write-ahead **order intent** with a deterministic identity
+  (`order_intent_id = {trade_id}:{purpose}`,
+  `client_order_id = {run_id}-{trade_id}-{purpose}`). A retry reuses that
+  identity, so a retry is never a second order. Exchange replies are normalized
+  (`NEW / PARTIALLY_FILLED / FILLED / REJECTED / CANCELED / NOT_FOUND /
+  UNKNOWN`); `NOT_FOUND` and `UNKNOWN` never resolve to success, a fill is
+  recorded only for newly acknowledged quantity, and an unresolved intent is
+  reconciled rather than resubmitted.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_version_b_external_execution.py`
+  (`WriteAheadAndIdentityTests`, `FailureAccountingTests`) — duplicate
+  submission, lost response, `UNKNOWN`, partial fill, and rejection cases.
+- **Status:** implemented and verified against a deterministic exchange double.
+  Real venue deduplication and ack semantics remain `UNKNOWN`.
+
+### VB-EXEC-004 — Restart hydration and reconciliation
+
+- **Phase:** External Execution + Restart Recovery
+- **Category / severity:** Persistence / Operational / Critical
+- **Component:** `core/external_execution.py`, `core/execution_service.py`,
+  `core/trade_lifecycle.py`
+- **Observable change:** `ExternalExecutionService.recover()` reconciles every
+  non-terminal intent (including resting orders that filled while the process
+  was down), derives any lifecycle event a crash dropped from the durable fill,
+  recomputes trade quantity/state, and hydrates `VersionBExecutionService`
+  positions via `TradeLifecycle.from_records` + `hydrate_position` (margin,
+  balance, TP1/BE state, persisted-identity sets, trade counter). Recovery is
+  idempotent; anything still unknown is reported instead of assumed successful.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_version_b_external_execution.py`
+  (`RestartRecoveryTests`) — offline TP1 fill, crash between fill and event,
+  unresolvable intent, vanished resting stop, repeated recovery, and hydrated
+  accounting equal to the recorded fills.
+- **Status:** implemented and verified against a deterministic exchange double.
+  A restart drill against a real account is still required.
+
+### VB-EXEC-005 — Protection confirmation fails closed
+
+- **Phase:** External Execution + Restart Recovery
+- **Category / severity:** Safety / Execution / Critical
+- **Component:** `core/order_manager.py`
+- **Observable change:** **Behavior change.** Previously
+  `if hasattr(self.exchange, 'record_protection') and not ...` silently skipped
+  the protection check for any adapter without that method — which is every
+  live adapter today — so a live position could be accepted on a non-empty
+  create response alone. `OrderManager._require_confirmed_protection` now fails
+  closed: an adapter that cannot confirm protection raises
+  `LIVE BLOCKER: adapter cannot confirm protection`, and the filled entry is
+  emergency-closed. In `core/external_execution.py`, confirmation additionally
+  requires a **fetch/ack**, and a protective order that cannot be seen
+  afterwards is downgraded to `UNKNOWN` rather than left `ACCEPTED`.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_version_b_order_manager.py::test_adapter_without_confirmation_fails_closed`,
+  `test_version_b_external_execution.py::test_confirmation_requires_a_query_not_the_create_response`,
+  `::test_unconfirmed_stop_blocks_acceptance_and_flattens_the_fill`.
+- **Status:** implemented and verified. This makes the legacy live path fail
+  closed until the live adapter implements a real fetch/ack confirmation, which
+  is the documented `LB-002` requirement.
+
+### VB-DB-002 — Reconcilable order intent schema
+
+- **Phase:** External Execution + Restart Recovery
+- **Category / severity:** Persistence / High
+- **Component:** `database/version_b_store.py`, `database/migrations.py`
+- **Observable change:** `vb_order_intents` gains `purpose`, `exchange_status`,
+  `filled_quantity`, `average_fill_price`, `acknowledged_at`, `attempt_count`,
+  and `last_error`; `vb_trade_lifecycles` gains `leverage`. Without them an
+  intent cannot be reconciled and margin cannot be rebuilt after a restart.
+  Columns are added by an additive migration (`_ensure_additive_columns`) so
+  existing audit history is preserved. `SCHEMA_VERSION` is `vb-2`. New additive
+  read/idempotent APIs (`get_or_create_order_intent`, `update_order_intent` with
+  a transition guard, `reconcilable_order_intents`, `fills_for_intent`,
+  `find_event`, `max_event_sequence`, `open_trades`, `get_fill`) were added.
+  `record_fill` duplicate protection is unchanged.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_version_b_external_execution.py::StoreContractTests`
+  (additive upgrade of an existing store, conflicting identity refused) and
+  `::test_terminal_intent_state_cannot_be_rewritten`.
+- **Status:** implemented and verified
+
+### VB-REM-006 — Acceptance gate computes contract surfaces
+
+- **Phase:** External Execution + Restart Recovery
+- **Category / severity:** Measurement / High
+- **Component:** `version_b_acceptance.py`, `VERSION_B_ACCEPTANCE.md`,
+  `VERSION_B_TEST_CLASSIFICATION.md`
+- **Observable change:** The gate runs 68 deterministic assertions and now
+  reports `external_execution_contract` and `restart_recovery_contract` as
+  **computed** per-group results from the junit report instead of literals.
+  `live_exchange_acknowledgement` and `restart_exchange_reconciliation` stay
+  `UNKNOWN` by construction and publish the evidence each one requires.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** Gate run: 68 passed, 0 failed, 0 errors, 0 skipped;
+  `baseline_collected=false`. Negative control: forcing `NOT_FOUND` to resolve
+  as accepted turns both new surfaces to `FAIL` with 3 named tests.
+- **Status:** implemented and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths
@@ -222,8 +325,10 @@ after the initial component implementation.
 - The default `TradingBot()` constructor still builds the legacy coordinator;
   callers must opt into `version_b=True` until an operational migration is
   separately approved.
-- The live/exchange reconciliation and protection acknowledgement path is not
-  yet connected to VersionBStore.
+- The live/exchange path now has a durable contract
+  (`core/external_execution.py`) but `OrderManager`/`BinanceExchange` are not
+  yet wired to it. Until they are, the live adapter fails closed on protection
+  confirmation (`VB-EXEC-005`) and cannot open positions.
 
 No Historical Baseline or Paper performance baseline was started by these
 changes.

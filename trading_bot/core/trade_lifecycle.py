@@ -131,6 +131,63 @@ class TradeLifecycle:
             self.state = LifecycleState.PARTIALLY_CLOSED
         return event
 
+    @classmethod
+    def from_records(
+        cls,
+        *,
+        trade_id: str,
+        symbol: str,
+        side: str,
+        state: str,
+        initial_quantity: float,
+        remaining_quantity: float,
+        events: list[EventRecord],
+        fills: list[FillLeg],
+    ) -> "TradeLifecycle":
+        """Rebuild a lifecycle from durable rows after a restart.
+
+        Reconstruction is validated rather than trusted: a durable state that
+        does not describe a coherent lifecycle is refused instead of being
+        quietly accepted as a live position.
+        """
+        if side not in ("long", "short"):
+            raise ValueError(f"unsupported side: {side}")
+        if initial_quantity <= 0:
+            raise ValueError("initial_quantity must be positive")
+        ordered = sorted(events, key=lambda event: event.sequence)
+        for expected, event in enumerate(ordered, start=1):
+            if event.sequence != expected:
+                raise ValueError(
+                    f"lifecycle event sequence gap in {trade_id}: expected {expected}, got {event.sequence}"
+                )
+            if event.event_id != f"{trade_id}:{event.sequence}:{event.event_type}":
+                raise ValueError(f"lifecycle event identity mismatch in {trade_id}: {event.event_id}")
+        exit_quantity = sum(fill.quantity for fill in fills if fill.role == "exit")
+        expected_remaining = max(0.0, initial_quantity - exit_quantity)
+        if abs(expected_remaining - remaining_quantity) > 1e-9:
+            raise ValueError(
+                f"lifecycle quantity mismatch in {trade_id}: "
+                f"remaining={remaining_quantity}, fills imply {expected_remaining}"
+            )
+        if remaining_quantity <= 1e-12:
+            expected_state = LifecycleState.CLOSED
+        elif exit_quantity > 0:
+            expected_state = LifecycleState.PARTIALLY_CLOSED
+        else:
+            expected_state = LifecycleState.OPEN
+        if state != expected_state.value:
+            raise ValueError(
+                f"lifecycle state mismatch in {trade_id}: stored {state}, fills imply {expected_state.value}"
+            )
+        lifecycle = cls(trade_id=trade_id, symbol=symbol, side=side)
+        lifecycle.events = ordered
+        lifecycle.fills = list(fills)
+        lifecycle.initial_quantity = float(initial_quantity)
+        lifecycle.remaining_quantity = float(remaining_quantity)
+        lifecycle.state = expected_state
+        lifecycle._tp1_processed = any(event.event_type == "TAKE_PROFIT_1" for event in ordered)
+        return lifecycle
+
     @property
     def tp1_processed(self) -> bool:
         return self._tp1_processed

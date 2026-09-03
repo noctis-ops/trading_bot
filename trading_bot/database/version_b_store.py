@@ -87,6 +87,9 @@ class TradeLifecycleRecord(BaseModel):
     slippage = pw.FloatField(default=0.0)
     funding = pw.FloatField(default=0.0)
     net_pnl = pw.FloatField(null=True)
+    # Leverage is required to rebuild margin after a restart; it is execution
+    # state, not a strategy parameter.
+    leverage = pw.FloatField(null=True)
 
     class Meta:
         table_name = "vb_trade_lifecycles"
@@ -105,6 +108,16 @@ class OrderIntentRecord(BaseModel):
     status = pw.CharField()
     created_at = pw.DateTimeField(default=lambda: datetime.now(timezone.utc))
     confirmed_at = pw.DateTimeField(null=True)
+    # ── External execution contract (vb-2) ──────────────────────────────
+    # An intent is only reconcilable after a restart if the durable row also
+    # records what the exchange last told us about it.
+    purpose = pw.CharField(null=True)
+    exchange_status = pw.CharField(null=True)
+    filled_quantity = pw.FloatField(default=0.0)
+    average_fill_price = pw.FloatField(null=True)
+    acknowledged_at = pw.DateTimeField(null=True)
+    attempt_count = pw.IntegerField(default=0)
+    last_error = pw.TextField(null=True)
 
     class Meta:
         table_name = "vb_order_intents"
@@ -152,6 +165,63 @@ MODELS = [
 ]
 
 
+# ── Order intent state machine ────────────────────────────────────────────
+# Unresolved states are never success.  Terminal states cannot be rewritten
+# into a different outcome, and a fill-bearing intent cannot regress.
+INTENT_UNRESOLVED = ("CREATED", "SUBMITTED", "UNKNOWN")
+INTENT_KNOWN = ("ACCEPTED", "PARTIALLY_FILLED", "FILLED", "REJECTED", "CANCELED")
+_FILL_BEARING_STATUSES = ("PARTIALLY_FILLED", "FILLED")
+_TERMINAL_INTENT_STATUSES = ("FILLED", "REJECTED", "CANCELED")
+_INTENT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "CREATED": frozenset({"SUBMITTED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED", "REJECTED", "CANCELED", "UNKNOWN"}),
+    "SUBMITTED": frozenset({"ACCEPTED", "PARTIALLY_FILLED", "FILLED", "REJECTED", "CANCELED", "UNKNOWN"}),
+    "ACCEPTED": frozenset({"PARTIALLY_FILLED", "FILLED", "REJECTED", "CANCELED", "UNKNOWN"}),
+    "PARTIALLY_FILLED": frozenset({"FILLED", "REJECTED", "CANCELED", "UNKNOWN"}),
+    # UNKNOWN only ever leaves through reconciliation, never by itself.
+    "UNKNOWN": frozenset({"ACCEPTED", "PARTIALLY_FILLED", "FILLED", "REJECTED", "CANCELED"}),
+    "FILLED": frozenset(),
+    "REJECTED": frozenset(),
+    "CANCELED": frozenset(),
+}
+
+
+def _assert_intent_transition(current: str, requested: str) -> None:
+    """Reject impossible or fabricated intent transitions."""
+    if current not in _INTENT_TRANSITIONS:
+        raise ValueError(f"unknown intent status: {current}")
+    if requested not in _INTENT_TRANSITIONS:
+        raise ValueError(f"unknown intent status: {requested}")
+    if requested not in _INTENT_TRANSITIONS[current]:
+        raise ValueError(f"illegal order intent transition: {current} -> {requested}")
+
+
+# Columns added after vb-1.  Kept as an explicit additive list so an existing
+# durable store can be upgraded without dropping audit history.
+_ADDITIVE_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "vb_order_intents": (
+        ("purpose", "VARCHAR(255)"),
+        ("exchange_status", "VARCHAR(255)"),
+        ("filled_quantity", "REAL NOT NULL DEFAULT 0.0"),
+        ("average_fill_price", "REAL"),
+        ("acknowledged_at", "DATETIME"),
+        ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_error", "TEXT"),
+    ),
+    "vb_trade_lifecycles": (
+        ("leverage", "REAL"),
+    ),
+}
+
+
+def _ensure_additive_columns(database: pw.SqliteDatabase) -> None:
+    """Add missing nullable/defaulted columns to an existing schema."""
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {row[1] for row in database.execute_sql(f"PRAGMA table_info({table})")}
+        for name, declaration in columns:
+            if name not in existing:
+                database.execute_sql(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+
 class VersionBStore:
     """SQLite-backed store with idempotent identity and event writes."""
 
@@ -167,6 +237,7 @@ class VersionBStore:
         })
         DB.connect(reuse_if_open=True)
         DB.create_tables(MODELS, safe=True)
+        _ensure_additive_columns(DB)
 
     def close(self):
         if not DB.is_closed():
@@ -291,6 +362,30 @@ class VersionBStore:
     def create_order_intent(self, **values: Any) -> OrderIntentRecord:
         return OrderIntentRecord.create(**values)
 
+    def update_order_intent(self, order_intent_id: str, **values: Any) -> OrderIntentRecord:
+        """Apply an intent transition, refusing conflicting terminal rewrites.
+
+        The state machine lives here so no caller can turn an unresolved or
+        already-resolved intent into a different outcome by accident.
+        """
+        intent = OrderIntentRecord.get_by_id(order_intent_id)
+        requested_status = values.get("status")
+        if requested_status is not None and requested_status != intent.status:
+            _assert_intent_transition(intent.status, requested_status)
+        if requested_status in _FILL_BEARING_STATUSES and "filled_quantity" in values:
+            previous = intent.filled_quantity or 0.0
+            if float(values["filled_quantity"]) + 1e-12 < previous:
+                raise ValueError(
+                    f"acknowledged quantity cannot regress: {order_intent_id} "
+                    f"{previous} -> {values['filled_quantity']}"
+                )
+        if not values:
+            return intent
+        OrderIntentRecord.update(**values).where(
+            OrderIntentRecord.order_intent_id == order_intent_id
+        ).execute()
+        return OrderIntentRecord.get_by_id(order_intent_id)
+
     def append_event(
         self,
         *,
@@ -400,6 +495,127 @@ class VersionBStore:
                 for fill in fills
             ],
         }
+
+    # ── External execution / restart recovery read + idempotent APIs ───────
+    # These are additive.  They never relax the duplicate protection that
+    # `record_fill` and `append_event` already enforce at the storage layer.
+
+    def get_trade(self, trade_id: str) -> TradeLifecycleRecord | None:
+        return TradeLifecycleRecord.get_or_none(TradeLifecycleRecord.trade_id == trade_id)
+
+    def get_or_create_trade(self, **values: Any) -> TradeLifecycleRecord:
+        """Return the existing trade row when identity matches, else create it.
+
+        Identity is the `trade_id`.  A conflicting row for the same id is a
+        lineage error and is refused rather than silently merged.
+        """
+        trade_id = values["trade_id"]
+        existing = self.get_trade(trade_id)
+        if existing is not None:
+            for field in ("symbol", "side"):
+                if field in values and str(getattr(existing, field)) != str(values[field]):
+                    raise ValueError(f"conflicting trade identity: {trade_id}")
+            return existing
+        if "opened_at" in values:
+            values = dict(values, opened_at=_dt(values["opened_at"]))
+        return TradeLifecycleRecord.create(**values)
+
+    def open_trades(self, run_id: str | None = None) -> list[TradeLifecycleRecord]:
+        """Trades that are not CLOSED, ordered deterministically."""
+        query = TradeLifecycleRecord.select().where(TradeLifecycleRecord.state != "CLOSED")
+        if run_id is not None:
+            query = query.where(TradeLifecycleRecord.run == run_id)
+        return list(query.order_by(TradeLifecycleRecord.trade_id))
+
+    def events_for_trade(self, trade_id: str) -> list[LifecycleEventRecord]:
+        return list(
+            LifecycleEventRecord.select()
+            .where(LifecycleEventRecord.trade == trade_id)
+            .order_by(LifecycleEventRecord.sequence)
+        )
+
+    def get_event(self, event_id: str) -> LifecycleEventRecord | None:
+        return LifecycleEventRecord.get_or_none(LifecycleEventRecord.event_id == event_id)
+
+    def find_event(self, trade_id: str, event_type: str) -> LifecycleEventRecord | None:
+        """Locate an already-recorded logical event; used for restart idempotency."""
+        return LifecycleEventRecord.get_or_none(
+            (LifecycleEventRecord.trade == trade_id) & (LifecycleEventRecord.event_type == event_type)
+        )
+
+    def max_event_sequence(self, trade_id: str) -> int:
+        result = (
+            LifecycleEventRecord.select(pw.fn.MAX(LifecycleEventRecord.sequence))
+            .where(LifecycleEventRecord.trade == trade_id)
+            .scalar()
+        )
+        return int(result or 0)
+
+    def get_order_intent(self, order_intent_id: str) -> OrderIntentRecord | None:
+        return OrderIntentRecord.get_or_none(OrderIntentRecord.order_intent_id == order_intent_id)
+
+    def get_or_create_order_intent(self, **values: Any) -> OrderIntentRecord:
+        """Idempotent by `order_intent_id`; a conflicting identity is refused."""
+        order_intent_id = values["order_intent_id"]
+        existing = self.get_order_intent(order_intent_id)
+        if existing is not None:
+            for field in ("client_order_id", "symbol", "side", "order_type", "purpose"):
+                expected = values.get(field)
+                if expected is None:
+                    continue
+                if str(getattr(existing, field)) != str(expected):
+                    raise ValueError(
+                        f"conflicting order intent identity: {order_intent_id} ({field})"
+                    )
+            return existing
+        if "created_at" in values:
+            values = dict(values, created_at=_dt(values["created_at"]))
+        return OrderIntentRecord.create(**values)
+
+    def order_intents_for_trade(self, trade_id: str) -> list[OrderIntentRecord]:
+        return list(
+            OrderIntentRecord.select()
+            .where(OrderIntentRecord.trade == trade_id)
+            .order_by(OrderIntentRecord.order_intent_id)
+        )
+
+    def unresolved_order_intents(self, run_id: str | None = None) -> list[OrderIntentRecord]:
+        """Intents whose exchange outcome is not known.  Never empty-means-safe."""
+        query = OrderIntentRecord.select().where(OrderIntentRecord.status.in_(INTENT_UNRESOLVED))
+        if run_id is not None:
+            query = query.join(TradeLifecycleRecord).where(TradeLifecycleRecord.run == run_id)
+        return list(query.order_by(OrderIntentRecord.order_intent_id))
+
+    def reconcilable_order_intents(self, run_id: str | None = None) -> list[OrderIntentRecord]:
+        """Every intent that is not terminal.
+
+        Resting (``ACCEPTED``) orders are included because they can fill while
+        the process is down; restart recovery must observe those fills rather
+        than miss the exit.
+        """
+        query = OrderIntentRecord.select().where(
+            OrderIntentRecord.status.not_in(_TERMINAL_INTENT_STATUSES)
+        )
+        if run_id is not None:
+            query = query.join(TradeLifecycleRecord).where(TradeLifecycleRecord.run == run_id)
+        return list(query.order_by(OrderIntentRecord.order_intent_id))
+
+    def get_fill(self, fill_id: str) -> FillRecord | None:
+        return FillRecord.get_or_none(FillRecord.fill_id == fill_id)
+
+    def fills_for_intent(self, order_intent_id: str) -> list[FillRecord]:
+        return list(
+            FillRecord.select()
+            .where(FillRecord.order_intent == order_intent_id)
+            .order_by(FillRecord.fill_time, FillRecord.fill_id)
+        )
+
+    def fills_for_trade(self, trade_id: str) -> list[FillRecord]:
+        return list(
+            FillRecord.select()
+            .where(FillRecord.trade == trade_id)
+            .order_by(FillRecord.fill_time, FillRecord.fill_id)
+        )
 
     def backup_to(self, destination: str | Path) -> Path:
         """Create a consistent SQLite backup using SQLite's backup API."""

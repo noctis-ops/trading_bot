@@ -16,7 +16,8 @@ performed.
 | `test_version_b_backtest.py` | Replay / deterministic end-to-end | StrategyCore-to-risk-to-execution replay, 15M decisions, 5M exits and DB reconstruction | Historical performance or intrabar truth beyond the frozen model |
 | `test_version_b_replay_parity.py` | Replay / deterministic end-to-end | Backtest and Paper share the same decision and lifecycle output; explicit TradingBot B path is network-free | Binance connectivity, live protection acknowledgement |
 | `test_version_b_paper.py` | Deterministic end-to-end | Compatibility Paper lifecycle, leverage and TP1 idempotency | Deterministic replay alone is not operational Paper validation |
-| `test_version_b_order_manager.py` | Integration | Protection failure is critical and prevents unsafe acceptance | Full exchange reconciliation |
+| `test_version_b_order_manager.py` | Integration | Protection failure and missing confirmation capability are both critical and prevent unsafe acceptance | Full exchange reconciliation |
+| `test_version_b_external_execution.py` | Integration / recovery | Write-ahead intent identity, retry without duplicate order/fill, lost response, `UNKNOWN` never reported as success, partial fill, rejection, fetch/ack protection, terminal-state guard, restart hydration and idempotent reconciliation | Any real venue behavior: `clientOrderId` deduplication, ack/visibility semantics, live-account restart |
 
 ## Test doubles and fixtures
 
@@ -32,3 +33,11 @@ performed.
 - OHLCV frames in replay tests are synthetic deterministic fixtures. They prove
   no-lookahead/clock/lifecycle mechanics and do not constitute Historical
   Baseline data.
+- `DeterministicExchangeDouble` implements `ExternalOrderAdapter` in memory and
+  injects response loss after execution, submit timeouts, query failures,
+  `NOT_FOUND`, `UNKNOWN` replies, explicit rejection, partial fills, and
+  client-order-id deduplication. It proves the **local** invariants of the
+  external execution and restart recovery contract — no duplicate
+  order/fill/trade, and no fabricated exchange state. It does **not** prove that
+  any real venue behaves this way; that evidence is tracked separately in
+  `VERSION_B_EXTERNAL_EXECUTION.md` §6 and `VERSION_B_LIVE_BLOCKERS.md`.

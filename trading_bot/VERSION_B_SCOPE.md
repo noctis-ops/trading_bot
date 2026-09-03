@@ -215,10 +215,13 @@ Paper/Strategy parity.
 
 1. Exchange-specific fill rounding, partial fills, funding, liquidation, and
    mark-price behavior are not yet captured end-to-end.
-2. The legacy live adapter is not hydrated from the Version B store after a
-   process restart.
-3. Exchange-side confirmation semantics for stop placement need an adapter-level
-   fetch/ack contract, not only a non-empty create response.
+2. Restart hydration and reconciliation now exist as a durable contract
+   (`core/external_execution.py`, `VERSION_B_EXTERNAL_EXECUTION.md`) and are
+   proven against a deterministic double. The legacy live adapter is still not
+   wired to it, so no live restart evidence exists.
+3. A create → fetch/ack confirmation contract is implemented and enforced
+   fail-closed, but real venue acknowledgement/visibility semantics for stop
+   placement are still unverified.
 4. The Paper compatibility exchange still polls public ticker data; deterministic
    5M replay is provided by the B service/Backtest adapter.
 5. Legacy RiskManager enforcement and global portfolio risk caps are not fully
@@ -231,4 +234,6 @@ Paper/Strategy parity.
 9. Telegram authorization and alert delivery are not part of the acceptance
    gate.
 
-See `VERSION_B_LIVE_BLOCKERS.md` for the separate Live decision list.
+See `VERSION_B_LIVE_BLOCKERS.md` for the separate Live decision list, and
+`VERSION_B_EXTERNAL_EXECUTION.md` for the External Execution + Restart Recovery
+contract that items 2 and 3 now depend on.

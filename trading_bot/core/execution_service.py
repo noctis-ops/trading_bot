@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -244,6 +245,94 @@ class VersionBExecutionService:
                 opened_at=event_time,
             )
             self._persist_lifecycle(lifecycle)
+        return position
+
+    def _restore_trade_counter(self, trade_id: str) -> None:
+        """Keep generated trade ids from colliding with durable ones."""
+        match = re.search(r"(\d+)$", trade_id)
+        if match:
+            self._trade_counter = max(self._trade_counter, int(match.group(1)))
+
+    def _restore_persisted_identity(self, lifecycle: TradeLifecycle) -> None:
+        """Mark durable rows as already written so a restart cannot re-append them."""
+        for event in lifecycle.events:
+            self._persisted_events.add(event.event_id)
+        for index in range(1, len(lifecycle.fills) + 1):
+            self._persisted_fills.add(f"{lifecycle.trade_id}:fill:{index}")
+
+    def hydrate_position(
+        self,
+        *,
+        lifecycle: TradeLifecycle,
+        stop_loss: float,
+        take_profit_1: float,
+        take_profit_2: float,
+        leverage: float,
+        tp1_hit: bool | None = None,
+        sl_moved_to_be: bool | None = None,
+    ) -> ExecutionPosition:
+        """Rebuild one open position from durable lifecycle rows after a restart.
+
+        Balance, margin, and the persisted-identity sets are replayed from the
+        recorded fills, so hydration is arithmetically identical to the
+        pre-restart state and re-persisting the lifecycle writes no new rows.
+        Hydration never creates a second trade for a symbol that is already
+        loaded.
+        """
+        symbol = lifecycle.symbol
+        if symbol in self.positions:
+            raise ValueError(f"position already hydrated for {symbol}")
+        entries = [fill for fill in lifecycle.fills if fill.role == "entry"]
+        exits = [fill for fill in lifecycle.fills if fill.role == "exit"]
+        if not entries:
+            raise ValueError(f"cannot hydrate {lifecycle.trade_id} without an entry fill")
+        if leverage <= 0:
+            raise ValueError("leverage must be positive")
+
+        entry_quantity = sum(fill.quantity for fill in entries)
+        entry_price = sum(fill.price * fill.quantity for fill in entries) / entry_quantity
+        margin_locked = 0.0
+        remaining = 0.0
+        for fill in entries:
+            fill_margin = (fill.price * fill.quantity) / leverage
+            margin_locked += fill_margin
+            self.balance -= fill_margin + fill.fee
+            remaining += fill.quantity
+        for fill in exits:
+            released = margin_locked * (fill.quantity / remaining) if remaining > 0 else 0.0
+            if lifecycle.side == "long":
+                gross = (fill.price - entry_price) * fill.quantity
+            else:
+                gross = (entry_price - fill.price) * fill.quantity
+            margin_locked = max(0.0, margin_locked - released)
+            remaining -= fill.quantity
+            self.balance += released + (gross - fill.fee)
+
+        self._restore_trade_counter(lifecycle.trade_id)
+        self._restore_persisted_identity(lifecycle)
+        if tp1_hit is None:
+            tp1_hit = lifecycle.tp1_processed
+        if sl_moved_to_be is None:
+            sl_moved_to_be = any(event.event_type == "BE_UPDATED" for event in lifecycle.events)
+        position = ExecutionPosition(
+            symbol=symbol,
+            side=lifecycle.side,
+            lifecycle=lifecycle,
+            entry_price=entry_price,
+            initial_quantity=lifecycle.initial_quantity,
+            remaining_quantity=lifecycle.remaining_quantity,
+            stop_loss=stop_loss,
+            take_profit_1=take_profit_1,
+            take_profit_2=take_profit_2,
+            leverage=leverage,
+            margin_locked=margin_locked,
+            tp1_hit=bool(tp1_hit),
+            sl_moved_to_be=bool(sl_moved_to_be),
+        )
+        if lifecycle.state == LifecycleState.CLOSED:
+            self.closed_lifecycles.append(lifecycle)
+        else:
+            self.positions[symbol] = position
         return position
 
     def _exit_delta(self, position: ExecutionPosition, fill_price: float, quantity: float, fee: float) -> float:

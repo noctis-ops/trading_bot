@@ -225,8 +225,7 @@ class OrderManager:
                 raise RuntimeError('take-profit-2 placement/confirmation failed')
             orders_placed['take_profit_2'] = tp2_order
 
-            if hasattr(self.exchange, 'record_protection') and not self.exchange.record_protection(symbol):
-                raise RuntimeError('LIVE BLOCKER: protection set was not confirmed')
+            self._require_confirmed_protection(symbol)
 
             # ── الخطوة 6: تسجيل الصفقة ───────────────────
             position_state = {
@@ -389,8 +388,7 @@ class OrderManager:
                 raise RuntimeError('take-profit-2 placement/confirmation failed')
             orders_placed['take_profit_2'] = tp2_order
 
-            if hasattr(self.exchange, 'record_protection') and not self.exchange.record_protection(symbol):
-                raise RuntimeError('LIVE BLOCKER: protection set was not confirmed')
+            self._require_confirmed_protection(symbol)
 
             # ── تسجيل الصفقة ────────────────────────────
             position_state = {
@@ -982,6 +980,23 @@ class OrderManager:
             short → 'buy'  (نشتري لنغلق صفقة بيع)
         """
         return 'buy' if side == 'short' else 'sell'
+
+    def _require_confirmed_protection(self, symbol: str) -> None:
+        """No position without confirmed protection (frozen Version B contract).
+
+        An adapter that cannot confirm protection is treated as *unconfirmed*,
+        not silently accepted.  The Paper adapter exposes ``record_protection``;
+        an adapter without a confirmation path fails closed instead of opening
+        an unprotected position.
+        """
+        confirm = getattr(self.exchange, 'record_protection', None)
+        if confirm is None:
+            raise RuntimeError(
+                'LIVE BLOCKER: adapter cannot confirm protection '
+                f'({type(self.exchange).__name__} exposes no record_protection)'
+            )
+        if not confirm(symbol):
+            raise RuntimeError('LIVE BLOCKER: protection set was not confirmed')
 
     def _place_stop_loss(
         self,

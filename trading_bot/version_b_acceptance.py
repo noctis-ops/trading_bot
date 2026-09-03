@@ -38,7 +38,34 @@ TEST_FILES = [
     "test_version_b_paper.py",
     "test_version_b_replay_parity.py",
     "test_version_b_order_manager.py",
+    "test_version_b_external_execution.py",
 ]
+
+# Deterministic contract groups reported separately from residual exchange
+# unknowns.  Keys are acceptance-surface names; values are junit class prefixes.
+DETERMINISTIC_GROUPS = {
+    "external_execution_contract": (
+        "test_version_b_external_execution.WriteAheadAndIdentityTests",
+        "test_version_b_external_execution.FailureAccountingTests",
+        "test_version_b_external_execution.StoreContractTests",
+    ),
+    "restart_recovery_contract": (
+        "test_version_b_external_execution.RestartRecoveryTests",
+    ),
+}
+
+# Surfaces that a network-free gate can never prove.  These stay UNKNOWN until
+# real exchange evidence exists; they are never inferred from local tests.
+RESIDUAL_EXCHANGE_UNKNOWNS = {
+    "live_exchange_acknowledgement": (
+        "requires real venue evidence that create->fetch/ack confirms a resting "
+        "stop and that clientOrderId is deduplicated on retry"
+    ),
+    "restart_exchange_reconciliation": (
+        "requires a restart drill against a real account reconciling every open "
+        "trade_id, intent, order, event, and fill"
+    ),
+}
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -132,20 +159,29 @@ def _run_tests() -> dict[str, Any]:
             "errors": 0,
             "skipped": 0,
             "failures": [],
+            "class_results": {},
         }
         try:
             root = ET.parse(report.name).getroot()
             for case in root.iter("testcase"):
                 result["passed"] += 1
+                classname = case.attrib.get("classname", "")
+                bucket = result["class_results"].setdefault(
+                    classname, {"passed": 0, "failed": 0}
+                )
+                bucket["passed"] += 1
                 failure = case.find("failure")
                 error = case.find("error")
                 skipped = case.find("skipped")
                 if skipped is not None:
                     result["passed"] -= 1
                     result["skipped"] += 1
+                    bucket["passed"] -= 1
                 if failure is not None:
                     result["passed"] -= 1
                     result["failed"] += 1
+                    bucket["passed"] -= 1
+                    bucket["failed"] += 1
                     result["failures"].append({
                         "name": f"{case.attrib.get('classname', '')}.{case.attrib.get('name', '')}",
                         "reason": failure.attrib.get("message", failure.text or "failure"),
@@ -153,6 +189,8 @@ def _run_tests() -> dict[str, Any]:
                 if error is not None:
                     result["passed"] -= 1
                     result["errors"] += 1
+                    bucket["passed"] -= 1
+                    bucket["failed"] += 1
                     result["failures"].append({
                         "name": f"{case.attrib.get('classname', '')}.{case.attrib.get('name', '')}",
                         "reason": error.attrib.get("message", error.text or "error"),
@@ -165,21 +203,41 @@ def _run_tests() -> dict[str, Any]:
         return result
 
 
+def _group_status(tests: dict[str, Any], prefixes: tuple[str, ...], blocked: bool) -> str:
+    """Compute one acceptance surface from the junit classes that prove it."""
+    if blocked:
+        return "BLOCKED"
+    class_results = tests.get("class_results") or {}
+    passed = failed = 0
+    for classname, counts in class_results.items():
+        if any(classname.startswith(prefix) for prefix in prefixes):
+            passed += counts["passed"]
+            failed += counts["failed"]
+    if passed == 0 and failed == 0:
+        return "BLOCKED"
+    return "FAIL" if failed else "PASS"
+
+
 def _acceptance_statuses(tests: dict[str, Any]) -> dict[str, str]:
     """Report mandatory path and parity independently from residual unknowns."""
-    if "No module named pytest" in tests.get("stderr_tail", ""):
+    blocked = "No module named pytest" in tests.get("stderr_tail", "")
+    if blocked:
         mandatory = "BLOCKED"
     elif tests.get("passed_all"):
         mandatory = "PASS"
     else:
         mandatory = "FAIL"
     parity = mandatory if mandatory in {"PASS", "FAIL", "BLOCKED"} else "UNKNOWN"
-    return {
+    statuses = {
         "full_version_b_path": mandatory,
         "backtest_paper_replay_parity": parity,
-        "live_exchange_acknowledgement": "UNKNOWN",
-        "restart_exchange_reconciliation": "UNKNOWN",
     }
+    for name, prefixes in DETERMINISTIC_GROUPS.items():
+        statuses[name] = _group_status(tests, prefixes, blocked)
+    # Never inferred from local tests: these need real exchange evidence.
+    for name in RESIDUAL_EXCHANGE_UNKNOWNS:
+        statuses[name] = "UNKNOWN"
+    return statuses
 
 
 def run_gate() -> dict[str, Any]:
@@ -195,6 +253,10 @@ def run_gate() -> dict[str, Any]:
         "acceptance": acceptance,
         "checks": checks,
         "tests": tests,
+        "residual_unknowns": [
+            {"surface": name, "required_evidence": reason}
+            for name, reason in RESIDUAL_EXCHANGE_UNKNOWNS.items()
+        ],
         "known_exceptions": [
             "pandas may emit a non-blocking pyarrow deprecation warning",
         ],

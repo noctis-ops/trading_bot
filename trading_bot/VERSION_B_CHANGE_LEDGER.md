@@ -309,6 +309,122 @@ after the initial component implementation.
   as accepted turns both new surfaces to `FAIL` with 3 named tests.
 - **Status:** implemented and verified
 
+### VB-MEAS-001 — Binding baseline artifact contract
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Measurement / High
+- **Component:** `core/baseline_artifact.py`, `VERSION_B_BASELINE_DEFINITION.md`
+- **Observable change:** A Historical Baseline artifact now has an enforced
+  schema (`vb-baseline-1`): mandatory `report_type=STRATEGY_MODEL_BASELINE`,
+  `measurement_scope=TYPE_1_STRATEGY_MODEL`, `not_an_operational_result`,
+  complete lineage, pinned metric keys, a self-labelling filename, and
+  `profitability_verdict: null`. Operational-verdict keys (`final_verdict`,
+  bare `win_rate`, `max_drawdown_pct`, `criteria`, ...) are rejected in the
+  artifact, in `metrics`, **and** in `counts`. `universe` must equal
+  `[symbol]`, so several symbols cannot be silently aggregated into one
+  per-symbol result.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_version_b_baseline_readiness.py::ArtifactContractTests`.
+  Negative control: removing the `counts` guard fails the contract surface.
+- **Status:** implemented and verified
+
+### VB-MEAS-002 — Reproducible measurement lineage
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Measurement / High
+- **Component:** `core/measurement_lineage.py`, `core/version_b_replay.py`
+- **Observable change:** **Behavior change.** The run header previously recorded
+  `code_version="working-tree"` and `data_hash=None`, which made a run
+  unreproducible while looking recorded. It now records the real commit plus a
+  dirty flag, a sha256 identity of the exact frames consumed, the config
+  snapshot hash, and the execution-model version. `UNRESOLVED` replaces the
+  placeholder, and a dirty tree is rejected by default.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `LineageTests`, `ReplayLineageTests`, `ReproducibilityTests`.
+- **Status:** implemented and verified
+
+### VB-MEAS-003 — One pinned max-drawdown definition
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Measurement / High
+- **Component:** `core/measurement_metrics.py`, `performance_report.py`
+- **Observable change:** Two incompatible definitions existed:
+  `performance_report.compute_max_drawdown` cumulated closed-trade PnL on an
+  arbitrary `+100` base, while the replay engine emitted an `equity_curve` and
+  no drawdown at all. One definition is now pinned
+  (`compute_equity_curve_max_drawdown`, on the marked curve against the actual
+  `initial_balance`) and is declared a **lower bound**, because the curve is
+  sampled per 15m decision bar while exits resolve on 5m bars. The legacy
+  function is marked as such and points at the canonical one.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `MetricDefinitionTests` (hand-computed 25% case, monotonic
+  curve, empty-curve and non-positive-balance refusal).
+- **Status:** implemented and verified
+
+### VB-MEAS-004 — Legacy report cannot be confused with Version B
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Measurement / High
+- **Component:** `performance_report.py`
+- **Observable change:** **Behavior change.** The legacy report emitted
+  `final_verdict: 'PASS'` from the legacy `Trade` table with no model or data
+  lineage, indistinguishable from a Version B result. It now emits
+  `report_type=LEGACY_OPERATIONAL_SUMMARY`,
+  `measurement_scope=TYPE_2_OPERATIONAL_LEGACY`,
+  `not_a_version_b_measurement=true`, a printed banner, and
+  `legacy_operational_verdict` with `LEGACY_OPERATIONAL_*` values.
+  `assert_not_baseline_artifact` refuses to score a baseline artifact.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_legacy_report_is_typed_and_carries_no_bare_verdict`,
+  `test_a_baseline_artifact_cannot_be_consumed_as_operational`.
+- **Status:** implemented and verified
+
+### VB-MEAS-005 — Costs are no longer silently zero
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Measurement / Medium
+- **Component:** `core/version_b_replay.py`
+- **Observable change:** `_trade_rows()` had no `fees`/`slippage` keys, so
+  `model_cost_total` would have reported `0.0` while net PnL already had fees
+  deducted — an internally inconsistent artifact. Both keys are now emitted and
+  asserted.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_trade_rows_expose_fees_so_costs_are_not_silently_zero`.
+- **Status:** implemented and verified
+
+### VB-OPS-001 — Test runs no longer dirty tracked files
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Operational / Measurement / Medium
+- **Component:** repository tracking (`.gitignore` already declared the policy)
+- **Observable change:** `trading_bot/logs/bot.log` was tracked even though
+  `.gitignore` lists `logs/` and `*.log`, so every test or gate run modified a
+  tracked file and left the tree permanently dirty. That made the
+  `require_clean_tree` lineage condition impossible to satisfy after any test
+  run. The 10 files already excluded by the repo's own `.gitignore`
+  (1 log, 9 `.pyc`) are now untracked; the files remain on disk.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** Full suite plus gate run produces zero tracked-file changes.
+- **Status:** implemented and verified
+
+### VB-REM-007 — Acceptance gate repairs Version A availability
+
+- **Phase:** Baseline Readiness
+- **Category / severity:** Measurement / High
+- **Component:** `version_b_acceptance.py`
+- **Observable change:** Three mandatory checks (`version_a_commit_exists`,
+  `version_a_is_ancestor`, `version_a_config_hash`) failed on a shallow
+  single-branch clone because commit `89bec19` was not in the object store —
+  an environmental failure that made the gate unusable. The gate now fetches
+  the object and removes shallow boundaries, and reports the attempt as a
+  separate `version_a_object_available` check. No check is skipped or weakened,
+  Version A is not rewritten, and HEAD, branch pointers, and the working tree
+  are untouched.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** Gate `PASS` with all 7 checks true; verified from a cold
+  `--depth 1` clone (`restored: true`).
+- **Status:** implemented and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

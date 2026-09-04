@@ -123,23 +123,45 @@ The Baseline is **accepted as a measurement** only when all of these hold:
 A Baseline that fails any of these is not a Baseline; it is an unlabelled
 model output.
 
-## 7. Readiness verdict
+## 7. Drawdown is a lower bound, not a measurement of the true trough
 
-**Can Version B produce a Type-1 Baseline today?** Yes — the replay path is
-deterministic, tested (68 assertions), and already stamps
-`execution_model_version` and `environment` into the run header, the summary,
-and every trade row.
+The equity curve is sampled **once per 15m decision bar**
+(`core/version_b_replay.py:400,444`), while exits resolve on 5m bars. A deeper
+trough inside a decision interval is therefore invisible to
+`equity_curve_max_drawdown_pct`. The metric definition states this, and the
+artifact carries it in `metric_definitions.max_drawdown`. It must be reported
+as a lower bound and never as the true maximum drawdown.
 
-**Can it produce one that cannot be misread as Type 2?** Not yet. Four
-guardrail gaps must be closed first, none of them strategy changes:
+## 8. Costs must be visible
 
-| # | Gap | Evidence |
-|---|---|---|
-| G1 | No Baseline artifact contract; nothing enforces the Type-1 label | This document is the contract; no code emits it yet |
-| G2 | Lineage incomplete: `code_version="working-tree"`, `data_hash=None` | `core/version_b_replay.py:95,98` |
-| G3 | Drawdown definition unpinned and inconsistent between modules | `performance_report.py:60-77` vs `equity_curve` in `core/version_b_replay.py` |
-| G4 | `performance_report.py` prints an operational `final_verdict: PASS` from **legacy** `Trade` tables with no model-version field | `performance_report.py:40,47-53,168`; `build_report` output has no `execution_model_version` |
+`model_cost_total` reads the `fees` key from each trade row. That key did not
+exist in `_trade_rows()`, so the metric would have silently reported `0.0`
+while net PnL already had fees deducted — an internally inconsistent artifact.
+`_trade_rows()` now emits `fees` and `slippage`, and a test asserts both the
+key's presence and that the metric is non-zero when fees exist.
 
-G4 is the live misinterpretation vector: it is the only performance tool in the
-repository, it reads `data/trading_bot.db` rather than `VersionBStore`, and its
-docstring already claims to "judge the bot's success objectively".
+## 9. Readiness verdict
+
+**All six gaps are closed.** None required a strategy, threshold, or risk
+parameter change.
+
+| # | Gap | Resolution | Proof |
+|---|---|---|---|
+| G1 | No binding artifact contract | `core/baseline_artifact.py`: schema, mandatory labels, pinned metric keys, forbidden-key rejection, filename pattern, `write_baseline_artifact` | `ArtifactContractTests` (10 tests) |
+| G2 | Lineage not reproducible | `core/measurement_lineage.py`: real commit + dirty flag, sha256 frame identity, config sha256, model version. `version_b_replay` records them instead of `working-tree` / `None` | `LineageTests`, `ReplayLineageTests` |
+| G3 | Two incompatible drawdown definitions | `core/measurement_metrics.py` pins one; `performance_report.compute_max_drawdown` is marked legacy and points at the canonical function | `MetricDefinitionTests` |
+| G4 | Legacy report could emit a confusable `PASS` | `report_type=LEGACY_OPERATIONAL_SUMMARY`, `measurement_scope=TYPE_2_OPERATIONAL_LEGACY`, verdict renamed to `legacy_operational_verdict` with `LEGACY_OPERATIONAL_*` values, plus `assert_not_baseline_artifact` | `test_the_legacy_report_is_typed_and_carries_no_bare_verdict` |
+| G5 | A test run dirtied a **tracked** `logs/bot.log`, so any post-test tree was dirty and `require_clean_tree` could never hold | Untracked the 10 files the repo's own `.gitignore` already excludes (`logs/`, `*.log`, `*.pyc`); files remain on disk | Full suite + gate run produces **zero** tracked-file changes |
+| G6 | Silently aggregating symbols into one per-symbol artifact | `universe == [symbol]` is enforced by the validator | `test_a_silently_aggregated_universe_is_refused` |
+
+Reproducibility is now testable rather than asserted:
+`artifact_fingerprint()` hashes the artifact with only the declared
+`non_deterministic_fields` (`generated_at`) removed, and
+`validate_baseline_artifact` refuses to widen that list. Two runs over
+identical frames produce identical fingerprints; different frames produce a
+different `data_hash` and a different fingerprint.
+
+**Verdict: Version B is READY as a measurement layer for a Type-1 Historical
+Baseline**, subject to two standing conditions: the artifact must be built with
+`require_clean_tree=True` from a committed tree, and the gate must report
+`PASS`.

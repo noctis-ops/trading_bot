@@ -44,6 +44,25 @@ from database.models import Trade, Signal, DailyPerformance, init_db, close_db
 # معايير النجاح (قابلة للتعديل هنا أو عبر معاملات)
 # ─────────────────────────────────────────────────────────
 
+LEGACY_REPORT_TYPE = 'LEGACY_OPERATIONAL_SUMMARY'
+LEGACY_MEASUREMENT_SCOPE = 'TYPE_2_OPERATIONAL_LEGACY'
+LEGACY_BANNER = (
+    'LEGACY_OPERATIONAL_SUMMARY reads the legacy Trade table only. It is not a '
+    'Version B measurement, it carries no execution-model or data lineage, and '
+    'its verdict must never be compared with a STRATEGY_MODEL_BASELINE result.'
+)
+
+
+def assert_not_baseline_artifact(payload: dict) -> None:
+    """Refuse to score a Version B baseline artifact with legacy criteria."""
+    from core.baseline_artifact import STRATEGY_MODEL_BASELINE, assert_not_type_1
+
+    if isinstance(payload, dict):
+        assert_not_type_1(payload)
+        if payload.get('report_type') == STRATEGY_MODEL_BASELINE:
+            raise ValueError(LEGACY_BANNER)
+
+
 SUCCESS_CRITERIA = {
     'win_rate_min':        55.0,   # %
     'profit_factor_min':   1.5,
@@ -59,6 +78,13 @@ SUCCESS_CRITERIA = {
 
 def compute_max_drawdown(trades_df: pd.DataFrame) -> float:
     """
+    ⚠️ LEGACY تعريف — لا يُستخدم في Version B.
+
+    هذا يحسب التراجع من مجموع PnL الصفقات المغلقة على أساس اعتباطي (+100)،
+    فهو ليس equity-based والنسبة بلا مقياس حقيقي. تعريف Version B الوحيد هو
+    `core.measurement_metrics.compute_equity_curve_max_drawdown` على منحنى
+    الـequity المُعلَّم مقابل initial_balance الفعلي.
+
     حساب أقصى تراجع (Max Drawdown) من منحنى الرصيد المتزايد.
 
     نفترض رصيداً ابتدائياً = 100 (نسبة مئوية نسبية) ونبني منحنى
@@ -145,10 +171,20 @@ def build_report(trades_df: pd.DataFrame, signals_count: int, criteria: dict) ->
 
     enough_trades = total >= criteria['min_trades_for_judge']
     passed_all = all(verdict.values())
-    final = 'PASS' if (enough_trades and passed_all) else 'PENDING/FAIL'
+    # Deliberately NOT 'PASS'/'FAIL'.  A bare PASS here was indistinguishable
+    # from a Version B measurement result; this report is a legacy operational
+    # summary over the legacy Trade table and must never be read as one.
+    final = (
+        'LEGACY_OPERATIONAL_PASS' if (enough_trades and passed_all)
+        else 'LEGACY_OPERATIONAL_PENDING_OR_FAIL'
+    )
 
     return {
         'status': 'completed',
+        'report_type': LEGACY_REPORT_TYPE,
+        'measurement_scope': LEGACY_MEASUREMENT_SCOPE,
+        'not_a_version_b_measurement': True,
+        'measurement_banner': LEGACY_BANNER,
         'total_trades': total,
         'winning_trades': int(len(wins)),
         'losing_trades': int(len(losses)),
@@ -165,7 +201,7 @@ def build_report(trades_df: pd.DataFrame, signals_count: int, criteria: dict) ->
         'criteria': criteria,
         'verdict': verdict,
         'enough_trades': enough_trades,
-        'final_verdict': final,
+        'legacy_operational_verdict': final,
     }
 
 
@@ -176,8 +212,12 @@ def build_report(trades_df: pd.DataFrame, signals_count: int, criteria: dict) ->
 def print_report(report: dict):
     """طباعة التقرير بشكل منسق وجميل."""
     print("\n" + "═" * 66)
-    print("📊 تقرير أداء التداول — Performance Report")
+    print("📊 تقرير أداء التداول — LEGACY Operational Summary")
     print("═" * 66)
+    print(f"⚠️  {report.get('report_type', LEGACY_REPORT_TYPE)} | "
+          f"{report.get('measurement_scope', LEGACY_MEASUREMENT_SCOPE)}")
+    print("⚠️  ليس قياس Version B — لا execution-model lineage ولا data hash،")
+    print("⚠️  ولا يجوز مقارنة حكمه مع أي STRATEGY_MODEL_BASELINE.")
 
     if report.get('status') == 'no_trades':
         print(f"\n⏳ {report['message']}")
@@ -227,10 +267,11 @@ def print_report(report: dict):
     for k, v in report['exit_reason_distribution'].items():
         print(f"   {labels.get(k, k)}: {v}")
 
-    # ── الحكم النهائي ──────────────────────────────────
+    # ── الحكم النهائي (Legacy operational only) ────────
     print(f"\n{'═' * 66}")
+    print("ℹ️  الحكم التالي Legacy Operational — ليس حكم Version B.")
     if report['enough_trades']:
-        if report['final_verdict'] == 'PASS':
+        if report['legacy_operational_verdict'] == 'LEGACY_OPERATIONAL_PASS':
             print("🏆 الحكم: نجاح ✅ — اجتاز كل المعايير، جاهز للتجربة على Live بمبلغ صغير.")
         else:
             print("🔴 الحكم: لم ينجح بعد — افحص المعايير الفاشلة وعدّل المعاملات.")
@@ -301,6 +342,7 @@ def main():
     close_db()
 
     report = build_report(trades_df, signals_count, SUCCESS_CRITERIA)
+    assert_not_baseline_artifact(report)
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))

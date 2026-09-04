@@ -17,6 +17,7 @@ performed.
 | `test_version_b_replay_parity.py` | Replay / deterministic end-to-end | Backtest and Paper share the same decision and lifecycle output; explicit TradingBot B path is network-free | Binance connectivity, live protection acknowledgement |
 | `test_version_b_paper.py` | Deterministic end-to-end | Compatibility Paper lifecycle, leverage and TP1 idempotency | Deterministic replay alone is not operational Paper validation |
 | `test_version_b_order_manager.py` | Integration | Protection failure and missing confirmation capability are both critical and prevent unsafe acceptance | Full exchange reconciliation |
+| `test_version_b_baseline_readiness.py` | Pure unit / integration | Artifact contract enforcement, reproducible lineage, pinned equity-curve drawdown, legacy-report separation, per-symbol aggregation guard, artifact fingerprint reproducibility | Historical performance, statistical validity, or any operational result |
 | `test_version_b_external_execution.py` | Integration / recovery | Write-ahead intent identity, retry without duplicate order/fill, lost response, `UNKNOWN` never reported as success, partial fill, rejection, fetch/ack protection, terminal-state guard, restart hydration and idempotent reconciliation | Any real venue behavior: `clientOrderId` deduplication, ack/visibility semantics, live-account restart |
 
 ## Test doubles and fixtures

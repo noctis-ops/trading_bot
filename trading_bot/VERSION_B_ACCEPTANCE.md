@@ -4,10 +4,18 @@ This document defines the machine-checkable gate required before any Historical 
 
 ## Current remediation gate record
 
-As of 2026-09-03, the automated gate reports 68 mandatory assertions passed,
-0 failed, 0 errors, 0 skipped. `baseline_collected` remains `false`. The gate's
-final line depends on the immutable Version A object checks as well, so it
-requires a clone that actually contains commit `89bec19`.
+As of 2026-09-04, the automated gate reports **PASS** with 97 mandatory
+assertions passed, 0 failed, 0 errors, 0 skipped. `baseline_collected` remains
+`false`.
+
+The Version A object checks previously failed for an environmental reason: a
+shallow single-branch clone does not contain commit `89bec19`. The gate now
+repairs availability itself (`_ensure_version_a_object`: fetch the object, then
+remove shallow boundaries) and reports the attempt as its own
+`version_a_object_available` check. **No check is skipped or weakened** — the
+immutable commit, ancestry, and config-hash checks still run and still have to
+pass, and Version A is never rewritten. Verified from a cold `--depth 1`
+clone: `restored: true`.
 
 | Acceptance surface | Status | Evidence / limitation |
 |---|---|---|
@@ -15,18 +23,27 @@ requires a clone that actually contains commit `89bec19`.
 | Backtest ↔ Paper replay parity | `PASS` | Shared replay engine and identical decision/lifecycle fixture |
 | External execution contract | `PASS` | Computed from `WriteAheadAndIdentityTests`, `FailureAccountingTests`, `StoreContractTests`: write-ahead intent, retry identity, lost response, `UNKNOWN`, partial fill, rejection, terminal-state guard |
 | Restart recovery contract | `PASS` | Computed from `RestartRecoveryTests`: offline fill, crash between fill and event, unresolved reporting, vanished resting stop, idempotent re-recovery, hydrated accounting |
+| Baseline readiness contract | `PASS` | Computed from `LineageTests`, `MetricDefinitionTests`, `ArtifactContractTests`, `ReplayLineageTests`, `ReproducibilityTests`: artifact contract, reproducible lineage, pinned drawdown, legacy separation, aggregation guard |
 | Runtime/exchange protection acknowledgement | `UNKNOWN` | Requires a real venue: create → fetch/ack confirmation and `clientOrderId` deduplication |
 | Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction and deterministic reconciliation are covered; a live-account restart drill is not |
 
-The four `PASS` rows are computed from the junit report per test group. The two
+The five `PASS` rows are computed from the junit report per test group. The two
 `UNKNOWN` rows are `UNKNOWN` by construction: a network-free gate never infers
 exchange evidence, and the gate publishes the evidence each one requires under
 `residual_unknowns`. A residual `UNKNOWN` does not authorize Live.
 
-**Negative control.** Forcing `NOT_FOUND` to resolve as `ACCEPTED` in
+**Negative controls.** Forcing `NOT_FOUND` to resolve as `ACCEPTED` in
 `core/external_execution.py` turns `external_execution_contract` and
-`restart_recovery_contract` to `FAIL` with three named tests, so these surfaces
-are not vacuous.
+`restart_recovery_contract` to `FAIL` with three named tests. Removing the
+forbidden-key guard on `counts` in `core/baseline_artifact.py` turns
+`baseline_readiness_contract` to `FAIL` with one named test while the other two
+surfaces stay `PASS`. These surfaces are therefore computed and independent,
+not vacuous.
+
+**Tree cleanliness.** Running the full suite and the gate now changes **no
+tracked file**. Previously every run appended to the tracked `logs/bot.log`,
+which left the tree permanently dirty and made `require_clean_tree` impossible
+to satisfy.
 
 See `VERSION_B_EXTERNAL_EXECUTION.md` for the contract itself and the explicit
 split between double-proven behavior and required exchange evidence.
@@ -50,6 +67,7 @@ The gate must report exactly:
 - Paper: deterministic replay, accounting reconciliation, leverage semantics, lifecycle parity.
 - Parity: same event stream produces equivalent strategy decision and lifecycle state behavior.
 - Reports: chronological order, lifecycle aggregation, gross/net/cost separation, open positions separated.
+- Baseline readiness: artifact contract and labels, reproducible code/data/config/model lineage, one pinned max-drawdown definition, legacy-report separation, per-symbol aggregation guard, artifact reproducibility.
 - External execution: write-ahead intent, retry identity, lost response, `UNKNOWN`, partial fill, rejection, unconfirmed protection, terminal-state guard.
 - Restart recovery: reconciliation of every non-terminal intent, offline fills, dropped-event derivation, idempotent re-recovery, hydrated accounting, unresolved reporting.
 

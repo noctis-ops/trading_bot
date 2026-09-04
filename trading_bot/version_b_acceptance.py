@@ -39,6 +39,7 @@ TEST_FILES = [
     "test_version_b_replay_parity.py",
     "test_version_b_order_manager.py",
     "test_version_b_external_execution.py",
+    "test_version_b_baseline_readiness.py",
 ]
 
 # Deterministic contract groups reported separately from residual exchange
@@ -51,6 +52,13 @@ DETERMINISTIC_GROUPS = {
     ),
     "restart_recovery_contract": (
         "test_version_b_external_execution.RestartRecoveryTests",
+    ),
+    "baseline_readiness_contract": (
+        "test_version_b_baseline_readiness.LineageTests",
+        "test_version_b_baseline_readiness.MetricDefinitionTests",
+        "test_version_b_baseline_readiness.ArtifactContractTests",
+        "test_version_b_baseline_readiness.ReplayLineageTests",
+        "test_version_b_baseline_readiness.ReproducibilityTests",
     ),
 }
 
@@ -78,6 +86,53 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _version_a_object_present() -> bool:
+    return _git("cat-file", "-e", f"{VERSION_A_COMMIT}^{{commit}}").returncode == 0
+
+
+def _ensure_version_a_object() -> dict[str, Any]:
+    """Make the immutable Version A commit locally readable, without bypassing.
+
+    A shallow or single-branch clone can be missing the Version A object even
+    though it exists upstream.  That made three mandatory checks fail for an
+    environmental reason.  This repairs availability only: every check below
+    still runs unchanged and still has to pass.  It never rewrites, moves, or
+    reinterprets Version A, and it never touches HEAD, a branch pointer, or the
+    working tree.
+    """
+    if _version_a_object_present():
+        ancestry = _git("merge-base", "--is-ancestor", VERSION_A_COMMIT, "HEAD")
+        if ancestry.returncode == 0:
+            return {"attempted": False, "reason": "already present and ancestral"}
+        repair: list[dict[str, Any]] = []
+    else:
+        repair = []
+    # Order matters: fetch the object first, then remove shallow boundaries so
+    # the ancestry walk can actually reach it.
+    attempts = (
+        ["fetch", "--quiet", "origin", VERSION_A_COMMIT],
+        ["fetch", "--quiet", "--unshallow", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+        ["fetch", "--quiet", "--deepen", "2147483647", "origin"],
+    )
+    for args in attempts:
+        completed = _git(*args)
+        repair.append({
+            "command": "git " + " ".join(args),
+            "returncode": completed.returncode,
+            "stderr": completed.stderr.strip()[:200],
+        })
+        if _version_a_object_present() and _git(
+            "merge-base", "--is-ancestor", VERSION_A_COMMIT, "HEAD"
+        ).returncode == 0:
+            break
+    return {
+        "attempted": True,
+        "restored": _version_a_object_present(),
+        "ancestral": _git("merge-base", "--is-ancestor", VERSION_A_COMMIT, "HEAD").returncode == 0,
+        "steps": repair,
+    }
+
+
 def _manifest_checks() -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     try:
@@ -85,6 +140,17 @@ def _manifest_checks() -> list[dict[str, Any]]:
         checks.append({"name": "manifest_parse", "passed": True})
     except Exception as exc:
         return [{"name": "manifest_parse", "passed": False, "reason": str(exc)}]
+
+    # Availability repair is reported as its own check so a PASS is always
+    # attributable: either the object was already readable, or the repair ran
+    # and is visible here.  The immutable checks below are never skipped.
+    availability = _ensure_version_a_object()
+    checks.append({
+        "name": "version_a_object_available",
+        "passed": availability.get("restored", True) and availability.get("ancestral", True)
+        if availability.get("attempted") else True,
+        "reason": json.dumps(availability, ensure_ascii=False)[:600],
+    })
 
     checks.append({
         "name": "version_a_commit_immutable",

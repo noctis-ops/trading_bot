@@ -9,6 +9,14 @@ import pandas as pd
 
 from core.execution_model import EXECUTION_MODEL_VERSION
 from core.execution_service import VersionBExecutionService
+from core.measurement_lineage import (
+    UNRESOLVED,
+    build_lineage,
+    hash_frames,
+    resolve_code_identity,
+    resolve_config_identity,
+)
+from core.measurement_metrics import compute_model_metrics
 from core.risk_engine import RiskEngine
 from core.strategy_core import StrategyCore
 from core.runtime_config import load_runtime_config
@@ -69,7 +77,14 @@ class VersionBReplayEngine:
         self.initial_balance = float(initial_balance)
         self.store = store
         self.run_id = run_id
+        # A measurement without code and config identity is not reproducible, so
+        # the placeholder default is resolved rather than recorded verbatim.
+        self.code_identity = resolve_code_identity()
+        if config_hash in (None, "", "UNSPECIFIED"):
+            config_hash = resolve_config_identity().get("config_sha256", "UNSPECIFIED")
         self.config_hash = config_hash
+        self.data_hash: str | None = None
+        self.frame_row_counts: dict[str, int] = {}
         if self.store is not None and self.run_id is not None and hasattr(self.store, "create_run"):
             self._ensure_run_metadata()
         self.signals: list[dict[str, Any]] = []
@@ -92,7 +107,7 @@ class VersionBReplayEngine:
             self.store.create_run(
                 run_id=self.run_id,
                 environment=self.environment,
-                code_version="working-tree",
+                code_version=self.code_identity.get("commit", UNRESOLVED),
                 strategy_version=getattr(self.strategy_core.strategy, "version", "compatibility-fixture"),
                 config_hash=self.config_hash,
                 data_hash=None,
@@ -105,6 +120,28 @@ class VersionBReplayEngine:
             # it should not make the deterministic replay path unusable.
             if self.store.__class__.__module__.startswith("database."):
                 raise
+
+    def measurement_lineage(self, *, symbol: str, direction: str) -> dict[str, Any]:
+        """Lineage block for the baseline artifact contract.
+
+        Requires a completed ``run`` so the data identity is the identity of the
+        frames actually consumed.
+        """
+        if not self.data_hash:
+            raise ValueError("measurement_lineage requires a completed run")
+        return build_lineage(
+            code=self.code_identity,
+            data_hash=self.data_hash,
+            frame_row_counts=self.frame_row_counts,
+            config={"config_sha256": self.config_hash},
+            execution_model_version=EXECUTION_MODEL_VERSION,
+            strategy_version=getattr(self.strategy_core.strategy, "version", UNRESOLVED),
+            symbol=symbol,
+            direction=direction,
+            initial_balance=self.initial_balance,
+            universe=[symbol],
+            timeframes={"decision": self.decision_timeframe, "exit": self.exit_timeframe},
+        )
 
     @staticmethod
     def _normalise(*frames: pd.DataFrame) -> tuple[pd.DataFrame, ...]:
@@ -262,6 +299,10 @@ class VersionBReplayEngine:
                 "exit_time": lifecycle.events[-1].event_time,
                 "exit_type": exit_events[-1].event_type if exit_events else "UNKNOWN",
                 "profit": lifecycle.realized_net_pnl,
+                # Costs are reported separately from net PnL; without these the
+                # model_cost_total metric would silently read as zero.
+                "fees": sum(fill.fee for fill in lifecycle.fills),
+                "slippage": sum(fill.slippage for fill in lifecycle.fills),
                 "execution_model_version": EXECUTION_MODEL_VERSION,
                 "event_count": len(lifecycle.events),
             })
@@ -290,6 +331,24 @@ class VersionBReplayEngine:
         df_1h, df_15m, df_5m = self._normalise(df_1h, df_15m, df_5m)
         if min(len(df_1h), len(df_15m), len(df_5m)) == 0:
             return {"status": "insufficient_data", "execution_model_version": EXECUTION_MODEL_VERSION}
+
+        # Data identity is part of the measurement: two runs over different
+        # frames must not be comparable as the same baseline.
+        self.data_hash = hash_frames({"1h": df_1h, "15m": df_15m, "5m": df_5m})
+        self.frame_row_counts = {
+            "1h": int(len(df_1h)), "15m": int(len(df_15m)), "5m": int(len(df_5m))
+        }
+        if self.store is not None and self.run_id is not None and hasattr(self.store, "update_run"):
+            try:
+                self.store.update_run(
+                    self.run_id,
+                    data_hash=self.data_hash,
+                    code_version=self.code_identity.get("commit", UNRESOLVED),
+                    config_hash=self.config_hash,
+                )
+            except Exception:
+                # Custom stores may not expose the relational run model.
+                pass
 
         # Small strategy doubles from component tests predate the full
         # TradingStrategy breakdown API.  Keep their adapter contract narrow
@@ -403,6 +462,11 @@ class VersionBReplayEngine:
         profits = [float(item["profit"]) for item in trades]
         wins = [value for value in profits if value > 0]
         losses = [value for value in profits if value <= 0]
+        model_metrics = compute_model_metrics(
+            trades=trades,
+            equity_curve=self.equity_curve,
+            initial_balance=self.initial_balance,
+        )
         return {
             "status": "completed",
             "environment": self.environment,
@@ -425,4 +489,15 @@ class VersionBReplayEngine:
             "signals": self.signals,
             "trades": trades,
             "equity_curve": self.equity_curve,
+            # Measurement-integrity fields.  A forced end-of-data exit is a
+            # property of the chosen window, not a model outcome, so it is
+            # reported separately instead of being blended into the totals.
+            "model_metrics": model_metrics,
+            "model_forced_exit_count": model_metrics["model_forced_exit_count"],
+            "equity_curve_max_drawdown_pct": model_metrics["equity_curve_max_drawdown_pct"],
+            "initial_balance": self.initial_balance,
+            "data_hash": self.data_hash,
+            "frame_row_counts": getattr(self, "frame_row_counts", {}),
+            "code_identity": self.code_identity,
+            "config_hash": self.config_hash,
         }

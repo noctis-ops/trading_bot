@@ -45,6 +45,11 @@ class RunRecord(BaseModel):
     universe_json = pw.TextField()
     effective_config_json = pw.TextField()
     created_at = pw.DateTimeField(default=lambda: datetime.now(timezone.utc))
+    # Balance cannot be replayed after a restart from fills alone: it also
+    # needs the starting point the run was capitalised with.  Both of these
+    # are operational state, not strategy parameters.
+    initial_balance = pw.FloatField(null=True)
+    operational_state_json = pw.TextField(null=True)
 
     class Meta:
         table_name = "vb_runs"
@@ -210,6 +215,10 @@ _ADDITIVE_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "vb_trade_lifecycles": (
         ("leverage", "REAL"),
     ),
+    "vb_runs": (
+        ("initial_balance", "REAL"),
+        ("operational_state_json", "TEXT"),
+    ),
 }
 
 
@@ -262,6 +271,8 @@ class VersionBStore:
         universe: Iterable[str],
         effective_config: Mapping[str, Any],
         created_at: datetime | None = None,
+        initial_balance: float | None = None,
+        operational_state: Mapping[str, Any] | None = None,
     ) -> RunRecord:
         return RunRecord.create(
             run_id=run_id,
@@ -274,6 +285,8 @@ class VersionBStore:
             universe_json=_json(list(universe)),
             effective_config_json=_json(effective_config),
             created_at=_dt(created_at) or datetime.now(timezone.utc),
+            initial_balance=None if initial_balance is None else float(initial_balance),
+            operational_state_json=None if operational_state is None else _json(operational_state),
         )
 
     def update_run(self, run_id: str, **values: Any) -> RunRecord:
@@ -282,6 +295,24 @@ class VersionBStore:
             return RunRecord.get_by_id(run_id)
         RunRecord.update(**values).where(RunRecord.run_id == run_id).execute()
         return RunRecord.get_by_id(run_id)
+
+    def record_operational_state(self, run_id: str, state: Mapping[str, Any]) -> RunRecord:
+        """Persist the operational snapshot a restart needs to resume.
+
+        This is deliberately separate from ``effective_config``: config is
+        immutable run identity, operational state is mutable progress.
+        """
+        return self.update_run(run_id, operational_state_json=_json(state))
+
+    def operational_state(self, run_id: str) -> dict[str, Any]:
+        record = RunRecord.get_by_id(run_id)
+        if not record.operational_state_json:
+            return {}
+        return json.loads(record.operational_state_json)
+
+    def run_initial_balance(self, run_id: str) -> float | None:
+        record = RunRecord.get_by_id(run_id)
+        return None if record.initial_balance is None else float(record.initial_balance)
 
     def record_decision(
         self,
@@ -346,6 +377,7 @@ class VersionBStore:
         initial_quantity: float = 0.0,
         remaining_quantity: float = 0.0,
         opened_at: datetime | None = None,
+        leverage: float | None = None,
     ) -> TradeLifecycleRecord:
         return TradeLifecycleRecord.create(
             trade_id=trade_id,
@@ -357,6 +389,10 @@ class VersionBStore:
             initial_quantity=initial_quantity,
             remaining_quantity=remaining_quantity,
             opened_at=_dt(opened_at),
+            # Margin cannot be rebuilt after a restart without the leverage the
+            # position was actually opened with, so it is written at creation
+            # rather than patched later by one caller.
+            leverage=None if leverage is None else float(leverage),
         )
 
     def create_order_intent(self, **values: Any) -> OrderIntentRecord:
@@ -468,6 +504,7 @@ class VersionBStore:
             "signal_id": trade.signal_id,
             "initial_quantity": trade.initial_quantity,
             "remaining_quantity": trade.remaining_quantity,
+            "leverage": trade.leverage,
             "stored_net_pnl": trade.net_pnl,
             "recomputed_net_pnl": recomputed_net_pnl,
             "stored_exit_reason": trade.final_exit_reason,

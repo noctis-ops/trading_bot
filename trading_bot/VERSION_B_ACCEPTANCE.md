@@ -4,9 +4,9 @@ This document defines the machine-checkable gate required before any Historical 
 
 ## Current remediation gate record
 
-As of 2026-09-04, the automated gate reports **PASS** with 97 mandatory
-assertions passed, 0 failed, 0 errors, 0 skipped. `baseline_collected` remains
-`false`.
+As of 2026-09-07, the automated gate reports **PASS** with 119 mandatory
+assertions passed, 0 failed, 0 errors, 0 skipped across 15 modules.
+`baseline_collected` remains `false`.
 
 The Version A object checks previously failed for an environmental reason: a
 shallow single-branch clone does not contain commit `89bec19`. The gate now
@@ -24,10 +24,11 @@ clone: `restored: true`.
 | External execution contract | `PASS` | Computed from `WriteAheadAndIdentityTests`, `FailureAccountingTests`, `StoreContractTests`: write-ahead intent, retry identity, lost response, `UNKNOWN`, partial fill, rejection, terminal-state guard |
 | Restart recovery contract | `PASS` | Computed from `RestartRecoveryTests`: offline fill, crash between fill and event, unresolved reporting, vanished resting stop, idempotent re-recovery, hydrated accounting |
 | Baseline readiness contract | `PASS` | Computed from `LineageTests`, `MetricDefinitionTests`, `ArtifactContractTests`, `ReplayLineageTests`, `ReproducibilityTests`: artifact contract, reproducible lineage, pinned drawdown, legacy separation, aggregation guard |
+| Integration acceptance contract | `PASS` | Computed from `OnePathNotParallelImplementationTests`, `StrategyRiskExecutionEndToEndTests`, `RestartDuringOpenLifecycleTests`, `LegacyFallbackClosureTests`: one unified path, decision→DB end to end, restart from rows alone, legacy fallback closure |
 | Runtime/exchange protection acknowledgement | `UNKNOWN` | Requires a real venue: create → fetch/ack confirmation and `clientOrderId` deduplication |
 | Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction and deterministic reconciliation are covered; a live-account restart drill is not |
 
-The five `PASS` rows are computed from the junit report per test group. The two
+The six `PASS` rows are computed from the junit report per test group. The two
 `UNKNOWN` rows are `UNKNOWN` by construction: a network-free gate never infers
 exchange evidence, and the gate publishes the evidence each one requires under
 `residual_unknowns`. A residual `UNKNOWN` does not authorize Live.
@@ -39,6 +40,12 @@ forbidden-key guard on `counts` in `core/baseline_artifact.py` turns
 `baseline_readiness_contract` to `FAIL` with one named test while the other two
 surfaces stay `PASS`. These surfaces are therefore computed and independent,
 not vacuous.
+
+**Integration negative controls.** Removing the persisted `leverage` from
+`open_position` fails 5 tests across `StrategyRiskExecutionEndToEndTests` and
+`RestartDuringOpenLifecycleTests`. Disabling the legacy-paper guard fails both
+`LegacyFallbackClosureTests` tests. Both sabotages were reverted and verified
+byte-identical to the pre-sabotage source.
 
 **Tree cleanliness.** Running the full suite and the gate now changes **no
 tracked file**. Previously every run appended to the tracked `logs/bot.log`,

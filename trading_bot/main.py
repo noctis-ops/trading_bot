@@ -200,6 +200,12 @@ def main():
     try:
         from core.bot import TradingBot
         bot = TradingBot()
+    except RuntimeError as e:
+        # Includes LegacyPaperPathDisabled: the pre-Version-B paper loop keeps
+        # state in memory only, never reaches VersionBStore, and therefore is
+        # not a rehearsal of the Live path.  Refusing is deliberate.
+        print(f"\n⛔ {e}")
+        sys.exit(2)
     except ValueError as e:
         print(f"\n❌ خطأ في الإعدادات: {e}")
         print("   راجع config.yaml و.env قبل إعادة المحاولة.")

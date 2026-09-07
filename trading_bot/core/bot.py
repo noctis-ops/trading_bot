@@ -57,6 +57,7 @@
     دون أي تعديل على market_data.py.
 """
 
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -88,6 +89,15 @@ from core.version_b_paper import VersionBPaperEngine
 # ─────────────────────────────────────────────────────────
 # قراءة الإعدادات
 # ─────────────────────────────────────────────────────────
+
+class LegacyPaperPathDisabled(RuntimeError):
+    """Raised when the pre-Version-B paper loop is requested implicitly.
+
+    That loop keeps position state in ``PaperTradingExchange`` memory and never
+    touches ``VersionBStore``, so it cannot be a rehearsal of the Live path and
+    cannot survive a restart.  It is refused rather than silently run.
+    """
+
 
 CONFIG_PATH = Path(__file__).parent.parent / 'config.yaml'
 
@@ -157,9 +167,11 @@ class TradingBot:
         version_b_engine = None,
         version_b_store = None,
         version_b_run_id: str | None = None,
+        version_b_db_path: Optional[str] = None,
         version_b_initial_balance: float = 10_000.0,
         version_b_fee_rate: float | None = None,
         version_b_slippage_rate: float | None = None,
+        allow_legacy_paper: bool = False,
     ):
         """
         تهيئة TradingBot.
@@ -194,18 +206,62 @@ class TradingBot:
                 strategy=strategy if isinstance(strategy, TradingStrategy) else strategy,
                 risk_engine=RiskEngine(),
             )
-            self.version_b_engine = version_b_engine or VersionBPaperEngine(
-                initial_balance=version_b_initial_balance,
-                strategy_core=self.strategy_core,
-                fee_rate=version_b_fee_rate,
-                slippage_rate=version_b_slippage_rate,
-                store=version_b_store,
-                run_id=version_b_run_id,
-            )
+            # Paper is only a rehearsal of Live if its state survives a restart,
+            # so a database path makes the bot own a durable pipeline rather
+            # than an in-memory engine.  Without one the bot says so out loud
+            # instead of quietly running memory-only.
+            self.version_b_pipeline = None
+            if version_b_db_path is not None and version_b_engine is None and version_b_store is None:
+                from core.version_b_paper import VersionBPaperPipeline
+
+                self.version_b_pipeline = VersionBPaperPipeline(
+                    db_path=version_b_db_path,
+                    run_id=version_b_run_id,
+                    initial_balance=version_b_initial_balance,
+                    strategy_core=self.strategy_core,
+                    fee_rate=version_b_fee_rate,
+                    slippage_rate=version_b_slippage_rate,
+                )
+                self.version_b_engine = self.version_b_pipeline.engine
+                self.version_b_store = self.version_b_pipeline.store
+                self.version_b_run_id = self.version_b_pipeline.run_id
+                self.version_b_durable = True
+            else:
+                self.version_b_engine = version_b_engine or VersionBPaperEngine(
+                    initial_balance=version_b_initial_balance,
+                    strategy_core=self.strategy_core,
+                    fee_rate=version_b_fee_rate,
+                    slippage_rate=version_b_slippage_rate,
+                    store=version_b_store,
+                    run_id=version_b_run_id,
+                )
+                self.version_b_store = version_b_store
+                self.version_b_run_id = version_b_run_id
+                self.version_b_durable = version_b_store is not None
+                if not self.version_b_durable:
+                    logger.warning(
+                        "⚠️ Version B Paper بدون مخزن دائم — الحالة في الذاكرة فقط "
+                        "ولا تنجو من إعادة التشغيل. مرّر version_b_db_path=..."
+                    )
             self.strategy = self.strategy_core.strategy
             self.risk_engine = self.strategy_core.risk_engine
             self._version_b_last_report = None
             return
+
+        if os.getenv("TRADING_MODE", "paper").lower().strip() == "paper" and not allow_legacy_paper:
+            raise LegacyPaperPathDisabled(
+                "TRADING_MODE=paper عبر المسار القديم (TradingStrategy → RiskManager → "
+                "OrderManager → PaperTradingExchange) معطّل: حالته في الذاكرة فقط، "
+                "ولا يمر بـ VersionBStore، ولا يصلح بروفة لمسار Live.\n"
+                "المسار المعتمد: TradingBot(version_b=True, version_b_db_path=...).\n"
+                "للتشغيل القديم صراحةً مرّر allow_legacy_paper=True "
+                "(سيُسجَّل تحذير حرج ولن يُعتبر بروفة لـ Live)."
+            )
+        if allow_legacy_paper:
+            logger.critical(
+                "🛑 المسار الورقي القديم مفعّل صراحةً (allow_legacy_paper=True). "
+                "هذا المسار ليس Version B وحالته غير دائمة."
+            )
 
         if not self.SYMBOLS:
             raise ValueError(
@@ -294,6 +350,8 @@ class TradingBot:
             "15m": self.market_data.get_complete_dataframe(symbol, self.MAIN_TIMEFRAME),
             "5m": self.market_data.get_complete_dataframe(symbol, self.CONFIRMATION_TIMEFRAME),
         }
+        if self.version_b_pipeline is not None:
+            self.version_b_pipeline.persist_state()
         self._version_b_last_report = self.version_b_engine.run(
             frames["1h"], frames["15m"], frames["5m"],
             symbol=symbol,

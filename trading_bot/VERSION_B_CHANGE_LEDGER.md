@@ -425,6 +425,166 @@ after the initial component implementation.
   `--depth 1` clone (`restored: true`).
 - **Status:** implemented and verified
 
+### VB-INT-001 — Durable leverage on the trade row
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Correctness / High
+- **Component:** `core/execution_service.py`, `database/version_b_store.py`
+- **Observable change:** **Behavior change; fixes a defect.** The unified path
+  called `create_trade(...)` without `leverage`, leaving the column NULL even
+  though it exists and is documented as required to rebuild margin. Restart
+  hydration therefore reported `missing durable leverage` for every position
+  opened through Backtest/Paper, and `reconstruct_trade` could not return it.
+  `create_trade` now accepts and stores leverage, `open_position` supplies it,
+  and `reconstruct_trade` returns it.
+- **Strategy rules/parameters changed:** No — leverage is execution state
+  already computed by the canonical RiskEngine.
+- **Evidence:** `StrategyRiskExecutionEndToEndTests`,
+  `RestartDuringOpenLifecycleTests`. Negative control: removing the persisted
+  leverage fails 5 tests across both classes.
+- **Status:** implemented and verified
+
+### VB-INT-002 — Order intents on the unified path
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/execution_service.py`
+- **Observable change:** **Behavior change.** Protection orders existed only in
+  memory: `_persist_lifecycle` wrote every fill with `order_intent=None` and no
+  intent row was ever created, so a restart could not tell which protection was
+  resting. The unified path now records `ENTRY` (FILLED) and `STOP_LOSS` /
+  `TAKE_PROFIT_1` / `TAKE_PROFIT_2` (SUBMITTED) using the same identity scheme
+  as the external execution contract, links each fill to the intent that
+  produced it, and transitions the consumed intent to FILLED.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_fills_are_linked_to_the_intent_that_produced_them`,
+  `test_pending_protection_is_still_pending_after_the_restart`.
+- **Status:** implemented and verified
+
+### VB-INT-003 — Restart recovery for the unified path
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Correctness / High
+- **Component:** `core/version_b_recovery.py` (new)
+- **Observable change:** **New capability.** `recover_unified_state` rebuilds
+  every open position of a run from durable rows alone — identity, fills,
+  TP1/breakeven state, resting intents, and balance/margin — and reports what it
+  could not rebuild rather than guessing. Previously `hydrate_position` was
+  reachable only from `ExternalExecutionService.recover`, so the deterministic
+  path had no restart story at all.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `RestartDuringOpenLifecycleTests` (6 tests), including a
+  fail-closed case for a run with no durable leverage and an idempotency case
+  proving a second recovery writes no rows.
+- **Status:** implemented and verified
+
+### VB-INT-004 — Paper is durable, not memory-only
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/version_b_paper.py`, `database/version_b_store.py`,
+  `database/migrations.py` (schema `vb-3`)
+- **Observable change:** **New capability.** `VersionBPaperPipeline` owns a
+  `VersionBStore` and a `run_id`, so Paper writes trades, events, fills,
+  intents, decisions, and an operational-state snapshot, and can resume with
+  `resume=True`. Two run-level fields became durable because a restart cannot
+  rebuild balance without them: `initial_balance` and `operational_state_json`
+  (additive columns; no audit history dropped).
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_paper_is_durable_and_reconstructable`,
+  `test_paper_state_survives_a_fresh_handle_on_the_same_database`,
+  `test_the_resting_stop_is_durable_paper_protection`.
+- **Status:** implemented and verified
+
+### VB-INT-005 — TradingBot runs the pipeline it holds
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/bot.py`
+- **Observable change:** **Behavior change.** `TradingBot(version_b=True)`
+  previously constructed a Paper engine with no store, so the bot's Version B
+  path was memory-only and the components merely sat next to each other. With
+  `version_b_db_path=...` the bot now owns a durable `VersionBPaperPipeline`,
+  runs its engine, and persists operational state per run. Without a database
+  path it warns explicitly that state is memory-only.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_trading_bot_version_b_owns_a_durable_pipeline`,
+  `test_memory_only_paper_is_reported_as_such`.
+- **Status:** implemented and verified
+
+### VB-INT-006 — Legacy paper path refused by default
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/bot.py`, `main.py`
+- **Observable change:** **Behavior change.** `main.py` constructs
+  `TradingBot()`, which resolved to the pre-Version-B chain
+  (`TradingStrategy → RiskManager → OrderManager → PaperTradingExchange`) with
+  all position state in memory and no `VersionBStore` writes — while
+  `TRADING_MODE=paper` is the documented default. That is now refused with
+  `LegacyPaperPathDisabled`; the legacy chain requires the named opt-in
+  `allow_legacy_paper=True`, which logs a critical warning. `main.py` reports
+  the refusal instead of starting the loop. The Live path is unchanged and
+  remains unproven.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `LegacyFallbackClosureTests`. Negative control: disabling the
+  guard fails both closure tests.
+- **Status:** implemented and verified
+
+### VB-INT-007 — A restart cannot silently change the cost model
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Correctness / Medium
+- **Component:** `core/version_b_paper.py`
+- **Observable change:** **Behavior change; fixes a defect found during
+  testing.** On resume, `fee_rate`/`slippage_rate` defaulted to `config.yaml`
+  rather than the values the run executed with, so a restarted process priced an
+  already-open trade under a different cost model and recorded nothing about the
+  change (observed: net PnL 32.19 instead of 32.50 on the deterministic
+  fixture). Both rates are now part of the durable operational state; resume
+  restores them and refuses a conflicting override, and refuses outright when
+  they are absent.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_a_restart_cannot_silently_change_the_cost_model`,
+  `test_the_restarted_position_still_executes_correctly`.
+- **Status:** implemented and verified
+
+### VB-INT-008 — The gate's Paper module tested the legacy exchange
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `test_version_b_paper.py`, `test_legacy_paper_exchange.py` (new)
+- **Observable change:** **Test-surface change.** `test_version_b_paper.py` was
+  a mandatory gate module that exercised `PaperTradingExchange` — the legacy
+  in-memory exchange — and never touched StrategyCore, the canonical RiskEngine,
+  or VersionBStore. The gate therefore reported a passing Paper surface that
+  proved nothing about Version B. It now tests `VersionBPaperEngine` and
+  `VersionBPaperPipeline`; the legacy exchange checks moved to
+  `test_legacy_paper_exchange.py`, labelled as non-Version-B coverage, with an
+  added test documenting that its state does not survive a restart.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_gate_paper_module_tests_the_version_b_paper_engine`.
+- **Status:** implemented and verified
+
+### VB-INT-009 — Trailing stop is not part of the canonical path
+
+- **Phase:** Integration Acceptance
+- **Category / severity:** Measurement / Medium (documentation)
+- **Component:** `core/version_b_recovery.py`, `VERSION_B_TEST_CLASSIFICATION.md`
+- **Observable change:** No code behavior change; recorded divergence. Trailing
+  exists only in the legacy `OrderManager._apply_trailing_stop` /
+  `RiskManager.should_update_trailing_stop`. The canonical path implements
+  breakeven-after-TP1 only, and `config.yaml` exposes no trailing parameter.
+  `TradeLifecycle` accepts a `TRAILING_UPDATED` event but nothing in the unified
+  path emits one, so recovery reports trailing updates if they ever appear
+  rather than assuming continuity. Adding trailing would be a strategy change
+  and is out of scope.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_restart_rebuilds_the_open_position_from_rows_alone`
+  asserts `breakeven_armed_before_restart`; `trailing_updates_before_restart`
+  is reported and empty.
+- **Status:** recorded
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

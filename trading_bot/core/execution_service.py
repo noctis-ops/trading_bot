@@ -11,6 +11,26 @@ from core.execution_model import EXECUTION_MODEL_VERSION, IntrabarDecision, eval
 from core.risk_model import FillLeg, calculate_realized_net_pnl
 from core.trade_lifecycle import LifecycleState, TradeLifecycle
 
+# Resting-protection purposes, identical to the external execution contract so
+# one intent identity scheme covers both the deterministic and the venue path.
+PURPOSE_ENTRY = "ENTRY"
+PURPOSE_STOP_LOSS = "STOP_LOSS"
+PURPOSE_TAKE_PROFIT_1 = "TAKE_PROFIT_1"
+PURPOSE_TAKE_PROFIT_2 = "TAKE_PROFIT_2"
+
+# An exit event that consumes a resting protection order.
+_EXIT_EVENT_TO_PURPOSE = {
+    "STOP_LOSS": PURPOSE_STOP_LOSS,
+    "TAKE_PROFIT_1": PURPOSE_TAKE_PROFIT_1,
+    "TAKE_PROFIT_2": PURPOSE_TAKE_PROFIT_2,
+}
+
+EXIT_EVENT_TYPES = frozenset({
+    "TAKE_PROFIT_1", "TAKE_PROFIT_2", "STOP_LOSS", "REVERSAL_EXIT",
+    "EMERGENCY_EXIT", "END_OF_DATA", "MANUAL_EXIT",
+})
+
+
 
 @dataclass
 class ExecutionPosition:
@@ -93,6 +113,128 @@ class VersionBExecutionService:
         self._trade_counter += 1
         return f"VB-{symbol.replace('/', '')}-{self._trade_counter:06d}"
 
+    # ── durable order intents (unified path) ──────────────────────────────
+    # A protection order that exists only in memory is not a protection order:
+    # after a restart nobody knows it was resting.  The unified path therefore
+    # records the same intent rows the venue path records, using the same
+    # identity scheme, so restart recovery can rebuild pending protection.
+
+    def _intent_id(self, trade_id: str, purpose: str) -> str:
+        return f"{trade_id}:{purpose}"
+
+    def _client_order_id(self, trade_id: str, purpose: str) -> str:
+        return f"{self.run_id}-{trade_id}-{purpose}"
+
+    def _record_intent(
+        self,
+        *,
+        lifecycle: TradeLifecycle,
+        purpose: str,
+        order_type: str,
+        quantity: float,
+        price: float | None,
+        status: str,
+        event_time: datetime | None,
+    ) -> str:
+        """Write one intent row idempotently and return its identity."""
+        if self.store is None or self.run_id is None:
+            return self._intent_id(lifecycle.trade_id, purpose)
+        order_intent_id = self._intent_id(lifecycle.trade_id, purpose)
+        self.store.get_or_create_order_intent(
+            order_intent_id=order_intent_id,
+            trade=lifecycle.trade_id,
+            client_order_id=self._client_order_id(lifecycle.trade_id, purpose),
+            symbol=lifecycle.symbol,
+            side=lifecycle.side,
+            order_type=order_type,
+            purpose=purpose,
+            intended_quantity=float(quantity),
+            intended_price=None if price is None else float(price),
+            status=status,
+            created_at=event_time,
+        )
+        return order_intent_id
+
+    def _record_protection_intents(
+        self,
+        lifecycle: TradeLifecycle,
+        *,
+        quantity: float,
+        entry_price: float,
+        stop_loss: float,
+        take_profit_1: float,
+        take_profit_2: float,
+        event_time: datetime | None,
+    ) -> None:
+        """Entry is filled inline; TP1/TP2/SL rest until an exit consumes them."""
+        entry_intent = self._record_intent(
+            lifecycle=lifecycle,
+            purpose=PURPOSE_ENTRY,
+            order_type="MARKET",
+            quantity=quantity,
+            price=entry_price,
+            status="CREATED",
+            event_time=event_time,
+        )
+        if self.store is not None and self.run_id is not None:
+            self.store.update_order_intent(
+                entry_intent,
+                status="FILLED",
+                filled_quantity=float(quantity),
+                average_fill_price=float(entry_price),
+                acknowledged_at=event_time,
+            )
+        for purpose, price, slice_quantity in (
+            (PURPOSE_TAKE_PROFIT_1, take_profit_1, quantity * 0.5),
+            (PURPOSE_TAKE_PROFIT_2, take_profit_2, quantity * 0.5),
+            (PURPOSE_STOP_LOSS, stop_loss, quantity),
+        ):
+            self._record_intent(
+                lifecycle=lifecycle,
+                purpose=purpose,
+                order_type="LIMIT" if purpose != PURPOSE_STOP_LOSS else "STOP_MARKET",
+                quantity=slice_quantity,
+                price=price,
+                # SUBMITTED is unresolved by definition, so the row shows up in
+                # unresolved_order_intents after a restart.
+                status="SUBMITTED",
+                event_time=event_time,
+            )
+
+    def _resolve_exit_intent(
+        self,
+        lifecycle: TradeLifecycle,
+        *,
+        event_type: str,
+        fill_price: float,
+        quantity: float,
+        event_time: datetime | None,
+    ) -> str | None:
+        """Mark the intent that produced this exit as filled and return its id."""
+        if self.store is None or self.run_id is None:
+            return None
+        purpose = _EXIT_EVENT_TO_PURPOSE.get(event_type, event_type)
+        order_intent_id = self._record_intent(
+            lifecycle=lifecycle,
+            purpose=purpose,
+            order_type="LIMIT" if event_type.startswith("TAKE_PROFIT") else "STOP_MARKET",
+            quantity=quantity,
+            price=fill_price,
+            status="CREATED",
+            event_time=event_time,
+        )
+        existing = self.store.get_order_intent(order_intent_id)
+        if existing is not None and existing.status == "FILLED":
+            return order_intent_id
+        self.store.update_order_intent(
+            order_intent_id,
+            status="FILLED",
+            filled_quantity=float(quantity),
+            average_fill_price=float(fill_price),
+            acknowledged_at=event_time,
+        )
+        return order_intent_id
+
     def _persist_lifecycle(self, lifecycle: TradeLifecycle) -> None:
         """Append only new lifecycle rows to the optional durable store."""
         if self.store is None or self.run_id is None:
@@ -112,10 +254,7 @@ class VersionBExecutionService:
                 payload=event.payload,
             )
             self._persisted_events.add(event.event_id)
-        exit_events = [event for event in lifecycle.events if event.event_type in {
-            "TAKE_PROFIT_1", "TAKE_PROFIT_2", "STOP_LOSS", "REVERSAL_EXIT",
-            "EMERGENCY_EXIT", "END_OF_DATA", "MANUAL_EXIT",
-        }]
+        exit_events = [event for event in lifecycle.events if event.event_type in EXIT_EVENT_TYPES]
         exit_index = 0
         for index, fill in enumerate(lifecycle.fills, start=1):
             fill_id = f"{lifecycle.trade_id}:fill:{index}"
@@ -124,14 +263,26 @@ class VersionBExecutionService:
                     exit_index += 1
                 continue
             fill_time = lifecycle.events[0].event_time
+            order_intent_id = None
+            if fill.role == "entry":
+                order_intent_id = self._intent_id(lifecycle.trade_id, PURPOSE_ENTRY)
             if fill.role == "exit":
                 if exit_index < len(exit_events):
                     fill_time = exit_events[exit_index].event_time
+                    # Link the fill to the resting intent that produced it, so a
+                    # restart can tell which protection was consumed.
+                    order_intent_id = self._intent_id(
+                        lifecycle.trade_id,
+                        _EXIT_EVENT_TO_PURPOSE.get(
+                            exit_events[exit_index].event_type,
+                            exit_events[exit_index].event_type,
+                        ),
+                    )
                 exit_index += 1
             self.store.record_fill(
                 fill_id=fill_id,
                 trade=lifecycle.trade_id,
-                order_intent=None,
+                order_intent=order_intent_id,
                 role=fill.role,
                 side=fill.side,
                 fill_time=fill_time,
@@ -161,7 +312,7 @@ class VersionBExecutionService:
         if lifecycle.state == LifecycleState.CLOSED:
             final_exit_reason = next(
                 (event.event_type for event in reversed(lifecycle.events)
-                 if event.event_type in {"TAKE_PROFIT_1", "TAKE_PROFIT_2", "STOP_LOSS", "REVERSAL_EXIT", "EMERGENCY_EXIT", "END_OF_DATA", "MANUAL_EXIT"}),
+                 if event.event_type in EXIT_EVENT_TYPES),
                 None,
             )
             values.update({
@@ -243,6 +394,16 @@ class VersionBExecutionService:
                 initial_quantity=lifecycle.initial_quantity,
                 remaining_quantity=lifecycle.remaining_quantity,
                 opened_at=event_time,
+                leverage=leverage,
+            )
+            self._record_protection_intents(
+                lifecycle,
+                quantity=quantity,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit_1=take_profit_1,
+                take_profit_2=take_profit_2,
+                event_time=event_time,
             )
             self._persist_lifecycle(lifecycle)
         return position
@@ -410,6 +571,13 @@ class VersionBExecutionService:
             position.remaining_quantity = 0.0
             self.positions.pop(symbol, None)
             self.closed_lifecycles.append(position.lifecycle)
+        self._resolve_exit_intent(
+            position.lifecycle,
+            event_type=decision.event_type,
+            fill_price=fill_price,
+            quantity=quantity,
+            event_time=event_time,
+        )
         self._persist_lifecycle(position.lifecycle)
 
         return {
@@ -453,6 +621,13 @@ class VersionBExecutionService:
         self.balance += released_margin + realized_exit_pnl
         self.positions.pop(symbol, None)
         self.closed_lifecycles.append(position.lifecycle)
+        self._resolve_exit_intent(
+            position.lifecycle,
+            event_type=event_type,
+            fill_price=price,
+            quantity=quantity,
+            event_time=event_time,
+        )
         self._persist_lifecycle(position.lifecycle)
         return {
             "symbol": symbol,

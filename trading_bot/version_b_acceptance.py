@@ -40,6 +40,8 @@ TEST_FILES = [
     "test_version_b_order_manager.py",
     "test_version_b_external_execution.py",
     "test_version_b_baseline_readiness.py",
+    "test_version_b_integration_acceptance.py",
+    "test_legacy_paper_exchange.py",
 ]
 
 # Deterministic contract groups reported separately from residual exchange
@@ -52,6 +54,12 @@ DETERMINISTIC_GROUPS = {
     ),
     "restart_recovery_contract": (
         "test_version_b_external_execution.RestartRecoveryTests",
+    ),
+    "integration_acceptance_contract": (
+        "test_version_b_integration_acceptance.OnePathNotParallelImplementationTests",
+        "test_version_b_integration_acceptance.StrategyRiskExecutionEndToEndTests",
+        "test_version_b_integration_acceptance.RestartDuringOpenLifecycleTests",
+        "test_version_b_integration_acceptance.LegacyFallbackClosureTests",
     ),
     "baseline_readiness_contract": (
         "test_version_b_baseline_readiness.LineageTests",

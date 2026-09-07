@@ -329,7 +329,10 @@ def test_full_bot():
         from utils.logger import logger
         from core.bot import TradingBot
 
-        bot = TradingBot()
+        # This test deliberately exercises the legacy chain, which is no longer
+        # reachable implicitly: TRADING_MODE=paper now requires the named
+        # opt-in.  It is legacy coverage, not Version B evidence.
+        bot = TradingBot(allow_legacy_paper=True)
         logger.success(
             f"✅ TradingBot جاهز | الرموز: {', '.join(bot.SYMBOLS)} | "
             f"صفقات متزامنة قصوى: {bot.MAX_CONCURRENT_POSITIONS}"

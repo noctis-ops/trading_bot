@@ -7,7 +7,7 @@ from pathlib import Path
 from database.version_b_store import MODELS, VersionBStore
 
 
-SCHEMA_VERSION = "vb-3"
+SCHEMA_VERSION = "vb-4"
 
 
 def initialize_version_b_database(path: str | Path) -> VersionBStore:

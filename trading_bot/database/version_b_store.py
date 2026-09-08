@@ -160,6 +160,68 @@ class FillRecord(BaseModel):
         table_name = "vb_fills"
 
 
+class RuntimeLockRecord(BaseModel):
+    """Single-instance ownership of one run.
+
+    A durable lock is the only thing that can stop a second process from
+    trading the same Paper account: an in-process flag proves nothing once the
+    first process is gone.
+    """
+
+    run = pw.ForeignKeyField(RunRecord, primary_key=True, backref="lock",
+                             column_name="run_id", on_delete="CASCADE")
+    holder = pw.CharField()
+    acquired_at = pw.DateTimeField()
+    heartbeat_at = pw.DateTimeField(null=True)
+    released_at = pw.DateTimeField(null=True)
+
+    class Meta:
+        table_name = "vb_runtime_locks"
+
+
+class RuntimeAuditRecord(BaseModel):
+    """Alert/audit trail for runtime component failures."""
+
+    audit_id = pw.CharField(primary_key=True)
+    run = pw.ForeignKeyField(RunRecord, backref="audit", column_name="run_id",
+                             on_delete="CASCADE")
+    at = pw.DateTimeField(index=True)
+    component = pw.CharField()
+    severity = pw.CharField()
+    code = pw.CharField()
+    detail_json = pw.TextField()
+
+    class Meta:
+        table_name = "vb_runtime_audit"
+        indexes = (
+            (("run", "at"), False),
+        )
+
+
+class RuntimeEventRecord(BaseModel):
+    """Identity of every market event already consumed.
+
+    This is what makes an event stream resumable: a restart continues after the
+    last persisted event instead of replaying the window from the beginning,
+    and a duplicate delivery cannot be executed twice.
+    """
+
+    event_id = pw.CharField(primary_key=True)
+    run = pw.ForeignKeyField(RunRecord, backref="events_consumed", column_name="run_id",
+                             on_delete="CASCADE")
+    symbol = pw.CharField(index=True)
+    timeframe = pw.CharField()
+    open_time = pw.DateTimeField(index=True)
+    processed_at = pw.DateTimeField()
+    outcome = pw.CharField()
+
+    class Meta:
+        table_name = "vb_runtime_events"
+        indexes = (
+            (("run", "open_time"), False),
+        )
+
+
 MODELS = [
     RunRecord,
     DecisionRecord,
@@ -167,6 +229,9 @@ MODELS = [
     OrderIntentRecord,
     LifecycleEventRecord,
     FillRecord,
+    RuntimeLockRecord,
+    RuntimeAuditRecord,
+    RuntimeEventRecord,
 ]
 
 
@@ -188,6 +253,10 @@ _INTENT_TRANSITIONS: dict[str, frozenset[str]] = {
     "REJECTED": frozenset(),
     "CANCELED": frozenset(),
 }
+
+
+class LockHeldError(RuntimeError):
+    """Another live instance owns this run."""
 
 
 def _assert_intent_transition(current: str, requested: str) -> None:
@@ -653,6 +722,130 @@ class VersionBStore:
             .where(FillRecord.trade == trade_id)
             .order_by(FillRecord.fill_time, FillRecord.fill_id)
         )
+
+
+    # ── Runtime: single-instance lock, audit trail, consumed-event identity ──
+    # These support continuous Paper operation.  All three are durable on
+    # purpose: a lock, an alert, and "which events did I already execute" are
+    # exactly the things that must not be reconstructed from memory.
+
+    def acquire_lock(self, *, run_id: str, holder: str,
+                     now: datetime | None = None) -> RuntimeLockRecord:
+        """Take ownership of a run, refusing if another holder still owns it."""
+        stamp = _dt(now) or datetime.now(timezone.utc)
+        existing = RuntimeLockRecord.get_or_none(RuntimeLockRecord.run == run_id)
+        if existing is not None:
+            if existing.released_at is None and existing.holder != holder:
+                raise LockHeldError(
+                    f"run {run_id} is owned by {existing.holder} since "
+                    f"{existing.acquired_at.isoformat()}"
+                )
+            if existing.released_at is None:
+                # Same holder re-acquiring after a crash: refresh, do not fork.
+                RuntimeLockRecord.update(heartbeat_at=stamp).where(
+                    RuntimeLockRecord.run == run_id
+                ).execute()
+                return RuntimeLockRecord.get_by_id(run_id)
+            RuntimeLockRecord.update(
+                holder=holder, acquired_at=stamp, heartbeat_at=stamp, released_at=None
+            ).where(RuntimeLockRecord.run == run_id).execute()
+            return RuntimeLockRecord.get_by_id(run_id)
+        return RuntimeLockRecord.create(
+            run=run_id, holder=holder, acquired_at=stamp, heartbeat_at=stamp
+        )
+
+    def release_lock(self, run_id: str, *, holder: str,
+                     now: datetime | None = None) -> bool:
+        """Release only your own lock; releasing someone else's is refused."""
+        existing = RuntimeLockRecord.get_or_none(RuntimeLockRecord.run == run_id)
+        if existing is None or existing.released_at is not None:
+            return False
+        if existing.holder != holder:
+            raise LockHeldError(f"run {run_id} is owned by {existing.holder}, not {holder}")
+        RuntimeLockRecord.update(released_at=_dt(now) or datetime.now(timezone.utc)).where(
+            RuntimeLockRecord.run == run_id
+        ).execute()
+        return True
+
+    def lock_holder(self, run_id: str) -> RuntimeLockRecord | None:
+        return RuntimeLockRecord.get_or_none(
+            (RuntimeLockRecord.run == run_id) & (RuntimeLockRecord.released_at.is_null())
+        )
+
+    def heartbeat(self, run_id: str, *, holder: str,
+                  now: datetime | None = None) -> RuntimeLockRecord:
+        existing = self.lock_holder(run_id)
+        if existing is None or existing.holder != holder:
+            raise LockHeldError(f"run {run_id} is not held by {holder}")
+        stamp = _dt(now) or datetime.now(timezone.utc)
+        RuntimeLockRecord.update(heartbeat_at=stamp).where(
+            RuntimeLockRecord.run == run_id
+        ).execute()
+        return RuntimeLockRecord.get_by_id(run_id)
+
+    def record_audit(self, *, run_id: str, component: str, severity: str, code: str,
+                     detail: Mapping[str, Any] | None = None,
+                     at: datetime | None = None) -> RuntimeAuditRecord:
+        """Append an alert/audit row.  Never raises on a repeat: it is a log."""
+        stamp = _dt(at) or datetime.now(timezone.utc)
+        audit_id = f"{run_id}:{stamp.isoformat()}:{component}:{code}"
+        existing = RuntimeAuditRecord.get_or_none(RuntimeAuditRecord.audit_id == audit_id)
+        if existing is not None:
+            return existing
+        return RuntimeAuditRecord.create(
+            audit_id=audit_id,
+            run=run_id,
+            at=stamp,
+            component=component,
+            severity=severity,
+            code=code,
+            detail_json=_json(detail or {}),
+        )
+
+    def audit_trail(self, run_id: str, *, component: str | None = None,
+                    severity: str | None = None) -> list[RuntimeAuditRecord]:
+        query = RuntimeAuditRecord.select().where(RuntimeAuditRecord.run == run_id)
+        if component is not None:
+            query = query.where(RuntimeAuditRecord.component == component)
+        if severity is not None:
+            query = query.where(RuntimeAuditRecord.severity == severity)
+        return list(query.order_by(RuntimeAuditRecord.at, RuntimeAuditRecord.audit_id))
+
+    def mark_event_processed(self, *, event_id: str, run_id: str, symbol: str,
+                            timeframe: str, open_time: datetime, outcome: str,
+                            processed_at: datetime | None = None) -> bool:
+        """Record that an event was consumed.  Returns False if already seen.
+
+        The primary key is the caller's own event identity, so a redelivery of
+        the same event is a no-op rather than a second execution.
+        """
+        existing = RuntimeEventRecord.get_or_none(RuntimeEventRecord.event_id == event_id)
+        if existing is not None:
+            return False
+        RuntimeEventRecord.create(
+            event_id=event_id,
+            run=run_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            open_time=_dt(open_time),
+            processed_at=_dt(processed_at) or datetime.now(timezone.utc),
+            outcome=outcome,
+        )
+        return True
+
+    def is_event_processed(self, event_id: str) -> bool:
+        return RuntimeEventRecord.get_or_none(RuntimeEventRecord.event_id == event_id) is not None
+
+    def last_processed_event(self, run_id: str) -> RuntimeEventRecord | None:
+        return (
+            RuntimeEventRecord.select()
+            .where(RuntimeEventRecord.run == run_id)
+            .order_by(RuntimeEventRecord.open_time.desc(), RuntimeEventRecord.event_id.desc())
+            .first()
+        )
+
+    def processed_event_count(self, run_id: str) -> int:
+        return RuntimeEventRecord.select().where(RuntimeEventRecord.run == run_id).count()
 
     def backup_to(self, destination: str | Path) -> Path:
         """Create a consistent SQLite backup using SQLite's backup API."""

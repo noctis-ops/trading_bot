@@ -217,6 +217,15 @@ class VersionBReplayEngine:
             config_hash=self.config_hash,
         )
 
+    # The operational runtime drives these same two steps one event at a time.
+    # They are exposed publicly so event-driven Paper and batch replay share
+    # one implementation instead of two that must be kept identical by hand.
+    def persist_decision(self, **kwargs: Any) -> None:
+        self._persist_decision(**kwargs)
+
+    def open_from_decision(self, **kwargs: Any) -> dict[str, Any] | None:
+        return self._open_from_decision(**kwargs)
+
     def _open_from_decision(
         self,
         *,

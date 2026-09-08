@@ -585,6 +585,130 @@ after the initial component implementation.
   is reported and empty.
 - **Status:** recorded
 
+### VB-OPS-002 — Event-driven Paper runtime
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/version_b_runtime.py` (new), `core/version_b_replay.py`
+- **Observable change:** **New capability.** `VersionBPaperRuntime` consumes one
+  market event at a time through the same StrategyCore → RiskEngine →
+  ExecutionService → TradeLifecycle → VersionBStore path. The engine's decision
+  and execution steps are exposed publicly (`persist_decision`,
+  `open_from_decision`) so event-driven Paper and batch replay share one
+  implementation instead of two kept identical by hand. `DeterministicMarketFeed`
+  emits closed bars in time order plus the open of the bar starting now; the
+  engine is never handed the frame.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `NormalBarByBarTests`, `EventDrivenReplayParityTests`. Negative
+  control: reordering the feed so the decision precedes the 5m bar closing at
+  the same instant fails the parity test.
+- **Status:** implemented and verified
+
+### VB-OPS-003 — Durable single-instance guard
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Operational / High
+- **Component:** `database/version_b_store.py` (`vb_runtime_locks`),
+  `core/version_b_runtime.py`
+- **Observable change:** **New capability.** Ownership of a run is a row. A
+  second live instance is refused with `NotPrimaryInstance`; releasing another
+  holder's lock is refused. A crashed process never released its lock, so a
+  supervisor may take over with an explicit `start(takeover=True)`, which
+  records `LOCK_TAKEN_OVER` at CRITICAL. Takeover is never silent, because two
+  processes trading one account is exactly what the lock prevents.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `SingleInstanceAndLegacyTests`,
+  `test_crash_without_shutdown_still_recovers_and_the_lock_is_reclaimable`.
+- **Status:** implemented and verified
+
+### VB-OPS-004 — Durable health state and audit trail
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Operational / Medium
+- **Component:** `database/version_b_store.py` (`vb_runtime_audit`),
+  `core/version_b_runtime.py`
+- **Observable change:** **New capability.** Data, execution, and database
+  component health plus the circuit-breaker state are written to the run header
+  and reloaded on resume. Component failures append audit rows
+  (`STALE_DATA`, `OUT_OF_ORDER_EVENT`, `ENTRY_SUBMIT_UNKNOWN`,
+  `PROTECTION_NOT_CONFIRMED`, `EMERGENCY_FLATTEN`, `CIRCUIT_BREAKER_OPEN`,
+  `CIRCUIT_BREAKER_CLOSED`, `LOCK_TAKEN_OVER`, `*_PERSIST_FAILED`) with
+  severity, so a degraded run explains itself after the fact.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `OperationalControlsTests`,
+  `test_health_state_is_stored_and_survives_a_restart`.
+- **Status:** implemented and verified
+
+### VB-OPS-005 — Consumed-event identity makes the stream resumable
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Correctness / High
+- **Component:** `database/version_b_store.py` (`vb_runtime_events`),
+  `core/version_b_runtime.py`, `database/migrations.py` (schema `vb-4`)
+- **Observable change:** **New capability.** Every consumed market event is
+  recorded under its own identity. A redelivery returns `DUPLICATE_IGNORED` and
+  executes nothing; a restart continues after the last persisted event instead
+  of replaying the window, and redelivering the consumed prefix is a no-op.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `DuplicateHandlingTests`,
+  `test_a_restart_continues_after_the_last_persisted_event`. Negative control:
+  removing the duplicate guard fails exactly the two idempotency tests.
+- **Status:** implemented and verified
+
+### VB-OPS-006 — Stale-data circuit breaker
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/version_b_runtime.py`
+- **Observable change:** **New capability.** Staleness, gaps, schema failures,
+  and out-of-order delivery are counted as data faults; at the threshold the
+  breaker opens and new entries are refused with `CIRCUIT_OPEN_REJECTED`.
+  **Exits keep processing while the breaker is open** — being able to get out is
+  never the thing to disable. Warm-up and empty history at start-up are
+  deliberately *not* faults, or every run would trip the breaker before its
+  first decision. A breaker opened by a data fault closes on the next healthy
+  decision and records `CIRCUIT_BREAKER_CLOSED`.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `BadDataTests` (4 tests).
+- **Status:** implemented and verified
+
+### VB-OPS-007 — Deterministic venue double and fail-closed protection
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Measurement / High
+- **Component:** `core/version_b_runtime.py`
+- **Observable change:** **New capability.** `DeterministicExchangeDouble`
+  implements the same `ExternalOrderAdapter` contract as the real path, so
+  timeout/UNKNOWN, rejection, partial fill, and vanished orders exercise the
+  real intent semantics. A lost response never becomes a fill: the intent stays
+  pending, health goes UNKNOWN, and `reconcile_pending` resolves only on
+  concrete evidence — reporting `STILL_UNKNOWN` rather than dropping it. A
+  partial fill is reported and alerted, and canonical risk sizing is **not**
+  silently overridden. Unconfirmed protection flattens the position with
+  `EMERGENCY_EXIT` rather than carrying an unprotected trade.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `VenueDegradationTests` (3 tests).
+- **Status:** implemented and verified; the venue remains a double
+
+### VB-INT-010 — Resting-stop intent follows the breakeven amendment
+
+- **Phase:** Operational Acceptance
+- **Category / severity:** Correctness / Medium
+- **Component:** `core/execution_service.py`
+- **Observable change:** **Behavior change; fixes a defect found during
+  testing.** When TP1 moved the stop to breakeven, the `BE_UPDATED` event
+  recorded it but the durable `STOP_LOSS` intent kept advertising the
+  pre-breakeven price and the original quantity. Recovery read the stop from the
+  event and was correct, so nothing caught it — but the intent row is what an
+  operator or a reconciler reads, and it disagreed with the lifecycle. The
+  intent is now amended to the level actually resting.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_resting_stop_is_durable_paper_protection`,
+  `test_one_decision_travels_the_whole_chain` (both previously asserted the
+  stale 98.5 and were asserting the defect),
+  `test_restart_after_tp1_and_breakeven_keeps_tp2_protection_alive`.
+- **Status:** implemented and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

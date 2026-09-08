@@ -228,9 +228,16 @@ class StrategyRiskExecutionEndToEndTests(UnifiedPathTestCase):
         intents = {i.purpose: i for i in store.order_intents_for_trade(trade_id)}
         self.assertEqual(set(intents), {PURPOSE_ENTRY, PURPOSE_STOP_LOSS,
                                         PURPOSE_TAKE_PROFIT_1, PURPOSE_TAKE_PROFIT_2})
-        self.assertAlmostEqual(intents[PURPOSE_STOP_LOSS].intended_price, 98.5)
         self.assertAlmostEqual(intents[PURPOSE_TAKE_PROFIT_1].intended_price, 102.0)
         self.assertAlmostEqual(intents[PURPOSE_TAKE_PROFIT_2].intended_price, 104.5)
+        # The stop was planned at 98.5 and then amended to breakeven once TP1
+        # took half.  The durable intent must show the level actually resting,
+        # so it reads 100.0 while the plan still records 98.5.
+        self.assertAlmostEqual(planned["stop_loss"], 98.5)
+        self.assertAlmostEqual(intents[PURPOSE_STOP_LOSS].intended_price, 100.0)
+        self.assertAlmostEqual(intents[PURPOSE_STOP_LOSS].intended_quantity, 5.0)
+        be = store.find_event(trade_id, "BE_UPDATED")
+        self.assertIsNotNone(be)
 
         # Stop parity inside the path: TP1 fired at 102 and TP2 at 104.5, the
         # exact planned levels, through the real 5m intrabar evaluation.

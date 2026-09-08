@@ -4,8 +4,8 @@ This document defines the machine-checkable gate required before any Historical 
 
 ## Current remediation gate record
 
-As of 2026-09-07, the automated gate reports **PASS** with 119 mandatory
-assertions passed, 0 failed, 0 errors, 0 skipped across 15 modules.
+As of 2026-09-08, the automated gate reports **PASS** with 146 mandatory
+assertions passed, 0 failed, 0 errors, 0 skipped across 16 modules.
 `baseline_collected` remains `false`.
 
 The Version A object checks previously failed for an environmental reason: a
@@ -24,11 +24,12 @@ clone: `restored: true`.
 | External execution contract | `PASS` | Computed from `WriteAheadAndIdentityTests`, `FailureAccountingTests`, `StoreContractTests`: write-ahead intent, retry identity, lost response, `UNKNOWN`, partial fill, rejection, terminal-state guard |
 | Restart recovery contract | `PASS` | Computed from `RestartRecoveryTests`: offline fill, crash between fill and event, unresolved reporting, vanished resting stop, idempotent re-recovery, hydrated accounting |
 | Baseline readiness contract | `PASS` | Computed from `LineageTests`, `MetricDefinitionTests`, `ArtifactContractTests`, `ReplayLineageTests`, `ReproducibilityTests`: artifact contract, reproducible lineage, pinned drawdown, legacy separation, aggregation guard |
+| Operational acceptance contract | `PASS` | Computed from the eight `test_version_b_operational_acceptance` classes: bar-by-bar operation, crash/restart/continue, duplicate events, venue degradation, bad data, single instance, operational controls, and event-driven vs replay parity |
 | Integration acceptance contract | `PASS` | Computed from `OnePathNotParallelImplementationTests`, `StrategyRiskExecutionEndToEndTests`, `RestartDuringOpenLifecycleTests`, `LegacyFallbackClosureTests`: one unified path, decision→DB end to end, restart from rows alone, legacy fallback closure |
 | Runtime/exchange protection acknowledgement | `UNKNOWN` | Requires a real venue: create → fetch/ack confirmation and `clientOrderId` deduplication |
 | Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction and deterministic reconciliation are covered; a live-account restart drill is not |
 
-The six `PASS` rows are computed from the junit report per test group. The two
+The seven `PASS` rows are computed from the junit report per test group. The two
 `UNKNOWN` rows are `UNKNOWN` by construction: a network-free gate never infers
 exchange evidence, and the gate publishes the evidence each one requires under
 `residual_unknowns`. A residual `UNKNOWN` does not authorize Live.
@@ -46,6 +47,11 @@ not vacuous.
 `RestartDuringOpenLifecycleTests`. Disabling the legacy-paper guard fails both
 `LegacyFallbackClosureTests` tests. Both sabotages were reverted and verified
 byte-identical to the pre-sabotage source.
+
+**Operational negative controls.** Removing the consumed-event guard fails
+exactly the two idempotency tests. Reordering the feed so a decision precedes
+the 5m bar closing at the same instant fails the replay-parity test. Both
+sabotages were reverted and verified byte-identical.
 
 **Tree cleanliness.** Running the full suite and the gate now changes **no
 tracked file**. Previously every run appended to the tracked `logs/bot.log`,

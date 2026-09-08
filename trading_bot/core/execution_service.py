@@ -201,6 +201,28 @@ class VersionBExecutionService:
                 event_time=event_time,
             )
 
+    def _amend_stop_intent(self, lifecycle: TradeLifecycle, *, price: float,
+                           event_time: datetime | None) -> None:
+        """Keep the durable resting-stop intent at the level actually resting.
+
+        Recovery reads the stop from the ``BE_UPDATED`` event, so it was already
+        correct — but the intent row still advertised the pre-breakeven price,
+        which is what an operator or a reconciler would read.  A durable record
+        that disagrees with the lifecycle is a defect even when nothing
+        currently consumes it.
+        """
+        if self.store is None or self.run_id is None:
+            return
+        order_intent_id = self._intent_id(lifecycle.trade_id, PURPOSE_STOP_LOSS)
+        if self.store.get_order_intent(order_intent_id) is None:
+            return
+        self.store.update_order_intent(
+            order_intent_id,
+            intended_price=float(price),
+            intended_quantity=float(lifecycle.remaining_quantity),
+            acknowledged_at=event_time,
+        )
+
     def _resolve_exit_intent(
         self,
         lifecycle: TradeLifecycle,
@@ -566,6 +588,9 @@ class VersionBExecutionService:
                 position.sl_moved_to_be = True
                 position.lifecycle.record_management_event(
                     "BE_UPDATED", {"stop_loss": position.stop_loss}, event_time=event_time
+                )
+                self._amend_stop_intent(
+                    position.lifecycle, price=position.stop_loss, event_time=event_time
                 )
         if position.remaining_quantity <= 1e-12:
             position.remaining_quantity = 0.0

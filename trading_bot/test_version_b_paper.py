@@ -84,7 +84,10 @@ class VersionBPaperTests(unittest.TestCase):
         stop = store.get_order_intent(f"{trade_id}:{PURPOSE_STOP_LOSS}")
         self.assertIsNotNone(stop)
         self.assertEqual(stop.status, "SUBMITTED")
-        self.assertAlmostEqual(stop.intended_price, 98.5)
+        # TP1 moved the stop to breakeven, so the durable resting intent shows
+        # 100.0 — the level actually resting, not the pre-TP1 98.5.
+        self.assertAlmostEqual(stop.intended_price, 100.0)
+        self.assertAlmostEqual(stop.intended_quantity, 5.0)
 
 
 if __name__ == "__main__":

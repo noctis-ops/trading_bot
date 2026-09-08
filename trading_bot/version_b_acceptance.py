@@ -41,6 +41,7 @@ TEST_FILES = [
     "test_version_b_external_execution.py",
     "test_version_b_baseline_readiness.py",
     "test_version_b_integration_acceptance.py",
+    "test_version_b_operational_acceptance.py",
     "test_legacy_paper_exchange.py",
 ]
 
@@ -54,6 +55,16 @@ DETERMINISTIC_GROUPS = {
     ),
     "restart_recovery_contract": (
         "test_version_b_external_execution.RestartRecoveryTests",
+    ),
+    "operational_acceptance_contract": (
+        "test_version_b_operational_acceptance.NormalBarByBarTests",
+        "test_version_b_operational_acceptance.CrashRestartContinueTests",
+        "test_version_b_operational_acceptance.DuplicateHandlingTests",
+        "test_version_b_operational_acceptance.VenueDegradationTests",
+        "test_version_b_operational_acceptance.BadDataTests",
+        "test_version_b_operational_acceptance.SingleInstanceAndLegacyTests",
+        "test_version_b_operational_acceptance.OperationalControlsTests",
+        "test_version_b_operational_acceptance.EventDrivenReplayParityTests",
     ),
     "integration_acceptance_contract": (
         "test_version_b_integration_acceptance.OnePathNotParallelImplementationTests",

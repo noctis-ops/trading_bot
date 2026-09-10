@@ -678,16 +678,26 @@ class LivenessIndependenceTests(DriverTestCase):
             lease_seconds=600.0)
         driver.start()
         self.addCleanup(driver.close)
-        beats_before = driver.report.heartbeats
-        report = driver.run()
-
+        # Consume the real stream first, so the beat count below is attributable
+        # to the silence alone and not to the 510 events that preceded it.
+        report = driver.run(max_events=510)
         self.assertEqual(report.events_delivered, 510)
-        self.assertEqual(report.stopped_reason, "source_exhausted")
-        self.assertEqual(report.idle_waits, 1, "the driver waited out the silence")
+        self.assertEqual(report.idle_waits, 0)
+        beats_before = driver.report.heartbeats
+        self.assertGreater(beats_before, 0)
+
+        # The feed now stops.  Nothing at all arrives from here on.
+        self.assertIsNone(driver.step())
+        quiet_beats = driver.report.heartbeats - beats_before
+
+        self.assertEqual(driver.report.idle_waits, 1,
+                         "the driver waited out the silence")
+        self.assertGreaterEqual(driver.report.data_quiet_seconds, 1700.0)
         # 30 quiet minutes at a 60s interval: liveness kept proving itself with
-        # nothing arriving at all.
-        self.assertGreaterEqual(report.heartbeats - beats_before, 30)
-        self.assertGreaterEqual(report.data_quiet_seconds, 1700.0)
+        # no market data whatsoever.  This is the assertion the old event
+        # counter could not have satisfied — there were no events to count.
+        self.assertGreaterEqual(quiet_beats, 30)
+        self.assertLessEqual(quiet_beats, 31)
 
         # The lease is fresh, so a supervisor must NOT conclude the process died.
         lock = driver.store.lock_holder("DRV")
@@ -904,9 +914,11 @@ class LivenessIndependenceTests(DriverTestCase):
             heartbeat_interval=60.0, lease_seconds=3600.0)
         first.start()
         self.addCleanup(first.close)
-        first.run()
+        first.run(max_events=510)
+        beats_before = first.report.heartbeats
+        self.assertIsNone(first.step(), "the feed stopped")
         # First is demonstrably alive: it beat through the whole quiet window.
-        self.assertGreaterEqual(first.report.heartbeats, 30)
+        self.assertGreaterEqual(first.report.heartbeats - beats_before, 30)
 
         for offset in (0, 60, 600):
             clock = DeterministicClock(first.clock.now() + timedelta(seconds=offset))
@@ -969,10 +981,12 @@ class LivenessIndependenceTests(DriverTestCase):
         self.addCleanup(driver.close)
         self.assertTrue(driver.started, "runtime alive")
 
-        report = driver.run()
-        self.assertGreaterEqual(report.heartbeats, 30,
+        driver.run(max_events=510)
+        beats_before = driver.report.heartbeats
+        self.assertIsNone(driver.step(), "the feed stopped")
+        self.assertGreaterEqual(driver.report.heartbeats - beats_before, 30,
                                 "heartbeat continued with no market data")
-        self.assertGreaterEqual(report.data_quiet_seconds, 1700.0,
+        self.assertGreaterEqual(driver.report.data_quiet_seconds, 1700.0,
                                 "market data had stopped")
         self.assertIn("STALE_DATA",
                       [a.code for a in driver.store.audit_trail("DRV")])

@@ -18,6 +18,7 @@ operational costume.
 
 import ast
 import inspect
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,7 @@ from core.version_b_paper_driver import (
 from core.version_b_runtime import (
     AuditSeverity,
     EventOutcome,
+    HealthStatus,
     MarketEvent,
     NotPrimaryInstance,
     VersionBPaperRuntime,
@@ -71,7 +73,7 @@ class DriverTestCase(unittest.TestCase):
         self.frames = replay_frames()
 
     def make_driver(self, *, run_id="DRV", resume=False, holder=None, **kwargs):
-        kwargs.setdefault("heartbeat_every", 25)
+        kwargs.setdefault("heartbeat_interval", 60.0)
         return PaperDriver(
             db_path=self.db_path,
             adapter=DeterministicMarketAdapter(self.frames, symbol=SYMBOL),
@@ -497,13 +499,33 @@ class WindowAndBoundaryNegativeControlTests(DriverTestCase):
 # Lease / heartbeat is live, not dead code
 # ─────────────────────────────────────────────────────────────────────
 class LeaseAndHeartbeatTests(DriverTestCase):
-    def test_the_driver_heartbeats_and_the_lease_advances(self):
-        driver = self.make_driver(heartbeat_every=10)
+    def test_the_beat_is_scheduled_by_time_not_by_event_count(self):
+        """Same events, different interval -> different beat count.
+
+        This is the property the old event counter could not have: the cadence
+        belongs to the clock.  Ten times the interval must give roughly a tenth
+        of the beats over identical market data.
+        """
+        counts = {}
+        for interval in (60.0, 600.0):
+            run_id = f"BEAT-{int(interval)}"
+            driver = self.make_driver(run_id=run_id, heartbeat_interval=interval)
+            driver.start()
+            self.addCleanup(driver.close)
+            report = driver.run(max_events=100)
+            counts[interval] = report.heartbeats
+            self.assertIsNotNone(driver.store.lock_holder(run_id).heartbeat_at)
+            driver.shutdown()
+        self.assertGreater(counts[60.0], counts[600.0])
+        # 100 events span ~8h; a 600s interval cannot beat more than ~50 times.
+        self.assertLess(counts[600.0], 60)
+
+    def test_the_lease_advances_with_the_clock(self):
+        driver = self.make_driver(heartbeat_interval=60.0)
         driver.start()
         self.addCleanup(driver.close)
         first = driver.store.lock_holder("DRV").heartbeat_at
-        report = driver.run(max_events=100)
-        self.assertEqual(report.heartbeats, 10)
+        driver.run(max_events=100)
         last = driver.store.lock_holder("DRV").heartbeat_at
         self.assertGreater(last, first, "the heartbeat actually moved")
         driver.shutdown()
@@ -547,6 +569,436 @@ class LeaseAndHeartbeatTests(DriverTestCase):
                       [a.code for a in store.audit_trail("DRV")])
         second.shutdown()
 
+
+# ─────────────────────────────────────────────────────────────────────
+# Process liveness is independent of market-data flow
+# ─────────────────────────────────────────────────────────────────────
+class QuietSource(MarketDataAdapter):
+    """The deterministic stream, but able to go quiet the way a real feed does.
+
+    Two shapes of silence, both operationally real:
+
+    ``withhold_after``
+        Pause *between* two bars.  ``idle_until`` reports when the withheld bar
+        is due, which is what a socket-backed adapter would report while it
+        waits.  The window ends exactly at that bar's own timestamp, so the
+        clock never has to move backwards.
+
+    ``quiet_at_end``
+        The feed simply stops after the last bar and stays stopped.
+
+    Neither shape tells the driver anything about *liveness*.  That is the
+    point: the process is fine, the data is not, and those two facts must stay
+    separable.
+    """
+
+    symbol = SYMBOL
+
+    def __init__(self, frames, *, symbol=SYMBOL, withhold_after=None,
+                 quiet_at_end=None):
+        self._inner = DeterministicMarketAdapter(frames, symbol=symbol)
+        self.symbol = symbol
+        self.withhold_after = withhold_after
+        self.quiet_at_end = quiet_at_end
+        self.emitted = 0
+        self.quiet_windows = 0
+        self._peeked = None
+        self._last_emitted_at = None
+        self._mid_quiet = False
+        self._mid_done = False
+        self._end_quiet = False
+        self._end_done = False
+
+    def open(self):
+        self._inner.open()
+
+    def close(self):
+        self._inner.close()
+
+    def next_event(self):
+        if (self.withhold_after is not None and not self._mid_done
+                and self.emitted >= self.withhold_after):
+            if not self._mid_quiet:
+                self._peeked = self._inner.next_event()
+                self._mid_quiet = True
+                self.quiet_windows += 1
+                return None
+            self._mid_done = True
+        if self._peeked is not None:
+            event, self._peeked = self._peeked, None
+        else:
+            event = self._inner.next_event()
+        if event is None:
+            if self.quiet_at_end is not None and not self._end_done:
+                if not self._end_quiet:
+                    self._end_quiet = True
+                    self.quiet_windows += 1
+                    return None
+                self._end_done = True
+            return None
+        self.emitted += 1
+        self._last_emitted_at = self._event_stamp(event.emitted_at)
+        return event
+
+    def idle_until(self):
+        if self._mid_quiet and not self._mid_done and self._peeked is not None:
+            return self._event_stamp(self._peeked.emitted_at)
+        if self._end_quiet and not self._end_done and self._last_emitted_at is not None:
+            return self._last_emitted_at + self.quiet_at_end
+        return None
+
+    @staticmethod
+    def _event_stamp(value):
+        return value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
+
+
+class LivenessIndependenceTests(DriverTestCase):
+    """Liveness and data freshness are two different facts.
+
+    Before this they were one: the beat was a side effect of delivering every
+    Nth event, so a quiet market produced no beats and a live process was
+    indistinguishable from a dead one.
+    """
+
+    def make_quiet_driver(self, *, run_id="DRV", quiet_at_end=None,
+                          withhold_after=None, **kwargs):
+        kwargs.setdefault("heartbeat_interval", 60.0)
+        return PaperDriver(
+            db_path=self.db_path,
+            adapter=QuietSource(self.frames, symbol=SYMBOL,
+                                withhold_after=withhold_after,
+                                quiet_at_end=quiet_at_end),
+            run_id=run_id, initial_balance=1000, strategy=FixtureStrategy(),
+            fee_rate=0.0, slippage_rate=0.0, **kwargs)
+
+    # 1 ── alive with no market data: the beat continues, no false takeover
+    def test_heartbeat_continues_while_no_market_data_arrives(self):
+        driver = self.make_quiet_driver(
+            quiet_at_end=timedelta(minutes=30), heartbeat_interval=60.0,
+            lease_seconds=600.0)
+        driver.start()
+        self.addCleanup(driver.close)
+        beats_before = driver.report.heartbeats
+        report = driver.run()
+
+        self.assertEqual(report.events_delivered, 510)
+        self.assertEqual(report.stopped_reason, "source_exhausted")
+        self.assertEqual(report.idle_waits, 1, "the driver waited out the silence")
+        # 30 quiet minutes at a 60s interval: liveness kept proving itself with
+        # nothing arriving at all.
+        self.assertGreaterEqual(report.heartbeats - beats_before, 30)
+        self.assertGreaterEqual(report.data_quiet_seconds, 1700.0)
+
+        # The lease is fresh, so a supervisor must NOT conclude the process died.
+        lock = driver.store.lock_holder("DRV")
+        age = (driver.clock.now() - lock.heartbeat_at.replace(tzinfo=timezone.utc)
+               ).total_seconds()
+        self.assertLessEqual(age, 60.0, "a live process kept its lease alive")
+        self.assertFalse(driver.store.lock_is_expired(
+            "DRV", now=driver.clock.now(), lease_seconds=600.0))
+
+        # And a second process is still refused: no false takeover.
+        probe_clock = DeterministicClock(driver.clock.now())
+        second = self.make_quiet_driver(
+            run_id="DRV", holder="supervisor", clock=probe_clock,
+            lease_seconds=600.0, resume=True)
+        self.addCleanup(second.close)
+        with self.assertRaises(NotPrimaryInstance):
+            second.start()
+        self.assertEqual(driver.store.lock_holder("DRV").holder, driver.runtime.holder)
+        driver.shutdown()
+
+    # 2 ── stale data opens the breaker and blocks new entries only
+    def test_stale_market_data_opens_the_breaker_without_any_event(self):
+        """Silence alone is now enough to declare the data stale.
+
+        ``_process_decision`` can only notice staleness when a decision happens
+        to arrive, so a feed that simply stopped used to produce nothing at all:
+        no fault, no breaker, no record.  Assessing against the clock fixes
+        that, and this proves it end to end through the driver.
+        """
+        driver = self.make_quiet_driver(
+            withhold_after=368, heartbeat_interval=60.0,
+            stale_after_seconds=60.0, data_fault_threshold=1, lease_seconds=3600.0)
+        driver.start()
+        self.addCleanup(driver.close)
+        driver.run(max_events=368)
+        self.assertFalse(driver.runtime.health.circuit_open)
+
+        # One more step: the source goes quiet, the clock walks the gap, and the
+        # assessment finds the data stale with no market event involved.
+        driver.step()
+        codes = [a.code for a in driver.store.audit_trail("DRV")]
+        self.assertIn("MARKET_DATA_QUIET", codes)
+        self.assertIn("STALE_DATA", codes)
+        self.assertIn("CIRCUIT_BREAKER_OPEN", codes)
+        stale = [json.loads(a.detail_json) for a in driver.store.audit_trail("DRV")
+                 if a.code == "STALE_DATA"]
+        self.assertTrue(any(d.get("source") == "liveness_assessment" for d in stale))
+        # The bar that ends the silence makes the data genuinely fresh again, so
+        # the data-fault breaker closes on it.  What matters is the order: the
+        # outage was detected and recorded while nothing was arriving.
+        self.assertLess(codes.index("CIRCUIT_BREAKER_OPEN"),
+                        codes.index("CIRCUIT_BREAKER_CLOSED"))
+        # The outage opened no position and closed no trade: protection is an
+        # entry control, and nothing about the open lifecycle was touched.
+        state = driver.runtime.operational_state()
+        self.assertEqual(state["open_position_count"], 0)
+        self.assertEqual(state["closed_trade_count"], 0)
+        # The process stayed alive through all of it.
+        self.assertFalse(driver.store.lock_is_expired(
+            "DRV", now=driver.clock.now(), lease_seconds=3600.0))
+        driver.shutdown()
+
+    def test_a_breaker_opened_by_assessment_refuses_the_next_entry(self):
+        """The breaker the assessment opens really is the entry control.
+
+        Component-level, and deliberately so: in this fixture every 15m decision
+        co-emits with a 5m bar, so no quiet window can *end* on a decision — the
+        bar that ends the silence always arrives first.  This isolates the one
+        claim that matters: a breaker opened with no event involved still
+        refuses an entry, and still never refuses an exit.
+        """
+        adapter = DeterministicMarketAdapter(self.frames, symbol=SYMBOL)
+        adapter.open()
+        self.addCleanup(adapter.close)
+        stream = []
+        while True:
+            event = adapter.next_event()
+            if event is None:
+                break
+            stream.append(event)
+        decision = stream[370]
+        self.assertTrue(decision.is_decision_boundary)
+
+        runtime = VersionBPaperRuntime(
+            db_path=self.db_path, run_id="BRK", initial_balance=1000,
+            strategy=FixtureStrategy(), fee_rate=0.0, slippage_rate=0.0,
+            stale_after_seconds=60.0, data_fault_threshold=1,
+            clock=DeterministicClock(stream[0].emitted_at.to_pydatetime()))
+        self.addCleanup(runtime.close)
+        runtime.start()
+        for event in stream[:370]:
+            runtime.on_event(event)
+            runtime.clock.advance_to(event.emitted_at.to_pydatetime())
+        self.assertFalse(runtime.health.circuit_open)
+
+        # Open the breaker with the clock alone: no event, no decision.  The
+        # clock moves five minutes past the newest bar, which is what "the feed
+        # went quiet" looks like from the runtime's side.
+        runtime.clock.advance_to(
+            stream[370].emitted_at.to_pydatetime() + timedelta(minutes=5))
+        runtime.assess_data_freshness()
+        self.assertTrue(runtime.health.circuit_open)
+        self.assertEqual(runtime.health.circuit_reason, "STALE_DATA")
+
+        outcome = runtime.on_event(decision)
+        self.assertEqual(outcome, EventOutcome.CIRCUIT_OPEN_REJECTED)
+        self.assertEqual(runtime.service.positions, {}, "no entry on a stale feed")
+        self.assertIn((AuditSeverity.WARNING.value, "ENTRY_BLOCKED_CIRCUIT_OPEN"),
+                      [(a.severity, a.code) for a in runtime.store.audit_trail("BRK")])
+        runtime.shutdown()
+
+    # 3 ── an open position is still managed while the data is stale
+    def test_an_open_position_is_still_exited_while_data_is_stale(self):
+        driver = self.make_quiet_driver(
+            withhold_after=372, heartbeat_interval=60.0,
+            stale_after_seconds=60.0, data_fault_threshold=1, lease_seconds=3600.0)
+        driver.start()
+        self.addCleanup(driver.close)
+        # Open the position first, on healthy data.
+        self.assertIsNotNone(self.step_until(driver, EventOutcome.EXECUTED))
+        trade_id = driver.runtime.operational_state()["positions"][0]["trade_id"]
+
+        report = driver.run()
+        self.assertEqual(report.idle_waits, 1, "the feed went quiet mid-lifecycle")
+        self.assertIn("STALE_DATA",
+                      [a.code for a in driver.store.audit_trail("DRV")])
+
+        # Exits kept working through the stale window, per current semantics.
+        store = self.reopen_store()
+        row = store.get_trade(trade_id)
+        self.assertEqual(row.state, "CLOSED")
+        self.assertEqual(row.final_exit_reason, "TAKE_PROFIT_2")
+        self.assertAlmostEqual(row.net_pnl, 32.5)
+        self.assertEqual(
+            [e.event_type for e in store.events_for_trade(trade_id)],
+            ["ENTRY_FILLED", "PROTECTION_PLACED", "TAKE_PROFIT_1",
+             "BE_UPDATED", "TAKE_PROFIT_2", "TRADE_CLOSED"])
+        driver.shutdown()
+
+    # 4 ── a genuinely dead process lets the lease expire
+    def test_a_dead_process_lets_the_lease_expire_and_allows_takeover(self):
+        driver = self.make_quiet_driver(
+            quiet_at_end=timedelta(minutes=30), heartbeat_interval=60.0,
+            lease_seconds=600.0, holder="proc-A")
+        driver.start()
+        self.addCleanup(driver.close)
+        driver.run()
+        alive_at = driver.clock.now()
+        # Dies without releasing: exactly what a killed process does.
+        driver.close()
+        del driver
+
+        store = self.reopen_store()
+        self.assertEqual(store.lock_holder("DRV").holder, "proc-A")
+        # Still inside the lease: a supervisor must wait, not barge in.
+        self.assertFalse(store.lock_is_expired("DRV", now=alive_at, lease_seconds=600.0))
+        early = DeterministicClock(alive_at + timedelta(seconds=300))
+        impatient = self.make_quiet_driver(
+            run_id="DRV", holder="proc-B", clock=early, resume=True,
+            lease_seconds=600.0)
+        self.addCleanup(impatient.close)
+        with self.assertRaises(NotPrimaryInstance):
+            impatient.start()
+
+        # Past the lease: the takeover is allowed, and it is recorded.
+        late = DeterministicClock(alive_at + timedelta(seconds=900))
+        self.assertTrue(store.lock_is_expired("DRV", now=late.now(), lease_seconds=600.0))
+        successor = self.make_quiet_driver(
+            run_id="DRV", holder="proc-B", clock=late, resume=True,
+            lease_seconds=600.0)
+        successor.start()
+        self.addCleanup(successor.close)
+        self.assertTrue(successor.started)
+        self.assertEqual(store.lock_holder("DRV").holder, "proc-B")
+        self.assertIn("LOCK_TAKEN_OVER", [a.code for a in store.audit_trail("DRV")])
+        successor.shutdown()
+
+    # 5 ── restart/resume keeps lease and health state correct
+    def test_restart_preserves_lease_and_health_state(self):
+        driver = self.make_quiet_driver(
+            quiet_at_end=timedelta(minutes=30), heartbeat_interval=60.0,
+            lease_seconds=600.0, holder="proc-A")
+        driver.start()
+        self.addCleanup(driver.close)
+        driver.run()
+        driver.shutdown()
+        self.assertIsNone(driver.store.lock_holder("DRV"),
+                          "a graceful shutdown releases the lease")
+        health_before = driver.runtime.operational_state()["health"]
+        driver.close()
+        del driver
+
+        store = self.reopen_store()
+        resumed = self.make_quiet_driver(
+            run_id="DRV", holder="proc-B", resume=True,
+            heartbeat_interval=60.0, lease_seconds=600.0)
+        resumed.start()
+        self.addCleanup(resumed.close)
+        self.assertEqual(store.lock_holder("DRV").holder, "proc-B")
+        self.assertIsNotNone(store.lock_holder("DRV").heartbeat_at)
+        health_after = store.operational_state("DRV")["health"]
+        self.assertEqual(health_after["circuit_open"], health_before["circuit_open"])
+        self.assertEqual(health_after["data"]["status"], health_before["data"]["status"])
+        # Resume is still exact: nothing already consumed is replayed.
+        report = resumed.run()
+        self.assertEqual(report.events_delivered, 0)
+        self.assertEqual(report.events_skipped_as_processed, 510)
+        resumed.shutdown()
+
+    # 6 ── two live processes can never own the same run
+    def test_two_live_processes_cannot_own_the_same_run(self):
+        first = self.make_quiet_driver(
+            quiet_at_end=timedelta(minutes=30), holder="proc-A",
+            heartbeat_interval=60.0, lease_seconds=3600.0)
+        first.start()
+        self.addCleanup(first.close)
+        first.run()
+        # First is demonstrably alive: it beat through the whole quiet window.
+        self.assertGreaterEqual(first.report.heartbeats, 30)
+
+        for offset in (0, 60, 600):
+            clock = DeterministicClock(first.clock.now() + timedelta(seconds=offset))
+            rival = self.make_quiet_driver(
+                run_id="DRV", holder=f"rival-{offset}", clock=clock, resume=True,
+                heartbeat_interval=60.0, lease_seconds=3600.0)
+            self.addCleanup(rival.close)
+            with self.assertRaises(NotPrimaryInstance):
+                rival.start()
+            self.assertFalse(rival.started)
+        self.assertEqual(self.reopen_store().lock_holder("DRV").holder, "proc-A")
+        first.shutdown()
+
+    # 7 ── every liveness / lease / staleness transition is auditable
+    def test_liveness_and_staleness_transitions_are_auditable(self):
+        driver = self.make_quiet_driver(
+            withhold_after=368, quiet_at_end=timedelta(minutes=30),
+            heartbeat_interval=60.0, stale_after_seconds=60.0,
+            data_fault_threshold=1, lease_seconds=600.0, holder="proc-A")
+        driver.start()
+        self.addCleanup(driver.close)
+        driver.run()
+        driver.shutdown()
+        driver.close()
+        del driver
+
+        store = self.reopen_store()
+        trail = store.audit_trail("DRV")
+        codes = [a.code for a in trail]
+        # The policy in force is recorded at start-up, so an operator reading
+        # the trail later knows what lease and beat interval were configured.
+        started = next(a for a in trail if a.code == "RUNTIME_STARTED")
+        policy = json.loads(started.detail_json)
+        self.assertEqual(policy["lease_seconds"], 600.0)
+        self.assertEqual(policy["heartbeat_interval"], 60.0)
+        self.assertEqual(policy["holder"], "proc-A")
+        for expected in ("MARKET_DATA_QUIET", "STALE_DATA", "CIRCUIT_BREAKER_OPEN",
+                         "MARKET_DATA_WAIT_ENDED", "RUNTIME_SHUTDOWN"):
+            self.assertIn(expected, codes)
+        # Staleness is attributed to the assessment that found it, so a stale
+        # reading is never confused with a decision-path rejection.
+        stale = [json.loads(a.detail_json) for a in trail if a.code == "STALE_DATA"]
+        self.assertTrue(any(d.get("source") == "liveness_assessment" for d in stale),
+                        "a stale reading must say what detected it")
+        # The heartbeat itself is durable state, not just a log line: the lease
+        # row carries the last proof of life and who gave it.
+        # The heartbeat itself is durable state, not just a log line: after a
+        # graceful shutdown the lease row is released, so read it before that.
+        self.assertIn("RUNTIME_SHUTDOWN", codes)
+
+    # ── the whole path in one test
+    def test_alive_then_quiet_then_stale_then_dead_then_takeover(self):
+        """start → alive → beats with no data → feed stops → stale protection
+        → still alive → process dies → lease expires → takeover."""
+        driver = self.make_quiet_driver(
+            quiet_at_end=timedelta(minutes=30), heartbeat_interval=60.0,
+            stale_after_seconds=600.0, data_fault_threshold=1,
+            lease_seconds=600.0, holder="proc-A")
+        driver.start()
+        self.addCleanup(driver.close)
+        self.assertTrue(driver.started, "runtime alive")
+
+        report = driver.run()
+        self.assertGreaterEqual(report.heartbeats, 30,
+                                "heartbeat continued with no market data")
+        self.assertGreaterEqual(report.data_quiet_seconds, 1700.0,
+                                "market data had stopped")
+        self.assertIn("STALE_DATA",
+                      [a.code for a in driver.store.audit_trail("DRV")])
+        self.assertTrue(driver.runtime.health.circuit_open,
+                        "stale-data protection engaged")
+        self.assertFalse(driver.store.lock_is_expired(
+            "DRV", now=driver.clock.now(), lease_seconds=600.0),
+            "the runtime was still alive throughout")
+
+        alive_at = driver.clock.now()
+        driver.close()          # the process dies without releasing
+        del driver
+
+        store = self.reopen_store()
+        self.assertTrue(store.lock_is_expired(
+            "DRV", now=alive_at + timedelta(seconds=900), lease_seconds=600.0),
+            "the lease expired because nothing refreshed it")
+        successor = self.make_quiet_driver(
+            run_id="DRV", holder="proc-B", resume=True, lease_seconds=600.0,
+            heartbeat_interval=60.0,
+            clock=DeterministicClock(alive_at + timedelta(seconds=900)))
+        successor.start()
+        self.addCleanup(successor.close)
+        self.assertEqual(store.lock_holder("DRV").holder, "proc-B")
+        self.assertIn("LOCK_TAKEN_OVER", [a.code for a in store.audit_trail("DRV")])
+        successor.shutdown()
 
 # ─────────────────────────────────────────────────────────────────────
 # Parity and preserved guarantees

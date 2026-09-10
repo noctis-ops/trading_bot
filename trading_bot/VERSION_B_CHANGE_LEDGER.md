@@ -912,6 +912,158 @@ after the initial component implementation.
   the driver source.
 - **Status:** documented, intentionally not changed
 
+### VB-LIV-001 — Heartbeat decoupled from market-data arrival
+- **Phase:** Liveness Independence
+- **Category / severity:** Correctness / High
+- **Component:** `core/version_b_paper_driver.py`
+- **Observable change:** **Behavior change; fixes a defect.** `PaperDriver` beat
+  only inside `_deliver`, on `events_delivered % heartbeat_every == 0`. Liveness
+  was therefore a function of data arrival, with three consequences: a quiet
+  market produced no beats at all, so the 600 s lease expired while the process
+  was alive and a supervisor saw a dead-looking live process; the cadence was
+  coupled to an unrelated quantity, so 25 events is ~2 h on a 5m stream but may
+  never occur inside one lease on a 1h-only stream; and because "alive but no
+  data" and "dead" produced the same observable, the two were
+  indistinguishable — exactly what a lease exists to disambiguate. `beat()` is
+  now due on elapsed time (`heartbeat_interval`, default 60 s) and is called at
+  the top of every loop iteration *before* asking the adapter for data.
+  `heartbeat_every` is removed.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_beat_is_scheduled_by_time_not_by_event_count` (same
+  events, 10× the interval ⇒ far fewer beats),
+  `test_heartbeat_continues_while_no_market_data_arrives`. Negative control:
+  restoring the event counter fails **5** liveness tests, including
+  `test_two_live_processes_cannot_own_the_same_run` — i.e. it reproduces the
+  false takeover.
+- **Status:** implemented and verified
+
+### VB-LIV-002 — The driver waits out a quiet source instead of ending the run
+- **Phase:** Liveness Independence
+- **Category / severity:** Architecture / Medium
+- **Component:** `core/version_b_paper_driver.py`
+- **Observable change:** **Behavior change.** `MarketDataAdapter` gains one
+  optional method, `idle_until() -> datetime | None`, defaulting to `None`
+  ("ask me again immediately"), so every existing adapter is unaffected. A
+  source that can be quiet — a socket-backed feed waiting for the next bar —
+  reports when it next expects data. `PaperDriver._wait_for_source` then walks
+  the clock through the gap in heartbeat-sized steps, beating and assessing
+  freshness at each one, instead of treating silence as the end of the stream.
+  `DriverReport` gains `idle_waits`, `data_quiet_seconds` and `last_beat`, and
+  `stopped_reason` gains `source_idle`. Bounded by `max_idle_waits` (default 64)
+  so a source that never resumes cannot hang the loop.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_heartbeat_continues_while_no_market_data_arrives`
+  (`idle_waits == 1`, `data_quiet_seconds >= 1700`, `heartbeats >= 30`).
+  Negative control: making `_wait_for_source` return immediately fails 5
+  liveness tests.
+- **Status:** implemented and verified
+
+### VB-LIV-003 — Staleness is now detectable with no market events at all
+- **Phase:** Liveness Independence
+- **Category / severity:** Correctness / High
+- **Component:** `core/version_b_runtime.py`
+- **Observable change:** **Behavior change; fixes a defect.** Staleness was only
+  ever assessed inside `_process_decision`, so it required a decision event to
+  arrive. A feed that simply *stopped* therefore produced nothing: no
+  `STALE_DATA`, no breaker, no audit row — the one condition the check exists
+  for was the one it could not see. `assess_data_freshness()` now measures the
+  newest consumed bar against the injected clock and registers the same
+  `STALE_DATA` fault through the same `_register_data_fault` path, so it opens
+  the same breaker and writes the same audit rows. It returns `None` when no
+  data has been consumed yet, because an empty history at start-up is warm-up
+  and calling it stale would open the breaker before the first decision. It is
+  deliberately **one-directional**: an assessment can register a fault, it never
+  clears one, so there is still exactly one path that closes the breaker.
+- **Strategy rules/parameters changed:** No. `stale_after_seconds` and
+  `data_fault_threshold` keep their existing defaults and meaning.
+- **Evidence:** `test_stale_market_data_opens_the_breaker_without_any_event`,
+  `test_a_breaker_opened_by_assessment_refuses_the_next_entry`,
+  `test_an_open_position_is_still_exited_while_data_is_stale`. Negative control:
+  removing the assessment call from the quiet wait fails 4 liveness tests.
+- **Status:** implemented and verified
+
+### VB-LIV-004 — `step()` no longer confuses a quiet source with a finished one
+- **Phase:** Liveness Independence
+- **Category / severity:** Correctness / Medium (defect found while testing)
+- **Component:** `core/version_b_paper_driver.py`
+- **Observable change:** **Behavior change; fixes a defect.** `step()` returned
+  `None` both when the adapter had nothing *yet* and when the stream was over,
+  so a caller stepping the driver by hand could not tell a pause from the end of
+  the run — and would silently stop a live Paper run. `step()` now waits the
+  quiet window out (beating throughout) and only returns `None` when the source
+  is genuinely exhausted.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_stale_market_data_opens_the_breaker_without_any_event`
+  drives the transition with a single `step()`; before the fix that step
+  returned `None` and emitted no `MARKET_DATA_QUIET`.
+- **Status:** implemented and verified
+
+### VB-LIV-005 — Finding: a silence-opened breaker is cleared by the bar that ends the silence
+- **Phase:** Liveness Independence
+- **Category / severity:** Behavior finding / Medium — **documented, deliberately
+  not changed**
+- **Component:** `core/version_b_runtime.py` (`on_event` auto-reset)
+- **Observable change:** None. Recorded so the limit is not mistaken for
+  protection that does not exist. `on_event` closes a breaker whose reason is in
+  `_AUTO_RESET_FAULTS` (`STALE_DATA`, `DATA_NOT_VALID`, `OUT_OF_ORDER_EVENT`)
+  after **any** event that processes without error, treating arrival as
+  recovery. So a breaker opened by an outage is closed by the first bar that
+  ends the outage — and in this data every 15m decision co-emits with a 5m bar,
+  so that bar always arrives first. Verified directly: `CIRCUIT_BREAKER_OPEN`
+  and then `CIRCUIT_BREAKER_CLOSED`, with the following decision executing
+  normally.
+  The consequence is bounded and stated plainly: the assessment path produces
+  correct health and audit state, but on its own it cannot block the decision
+  that immediately follows an outage. Entry blocking on stale data is instead
+  guaranteed by `_process_decision`'s own staleness check (`StaleDataRejected`,
+  which fires before any entry), and by the breaker whenever it is open at
+  decision time. Both are proven.
+  Not changed here because arrival of a fresh bar genuinely does make the data
+  fresh, so closing a *data-fault* breaker is defensible; making recovery require
+  sustained freshness would be a new debouncing policy, and it would alter
+  semantics proven at `749468d`. No test asserted `CIRCUIT_BREAKER_CLOSED`
+  before this step, so the auto-close was previously unexercised.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_stale_market_data_opens_the_breaker_without_any_event`
+  asserts the open-then-close order explicitly rather than asserting a state
+  that does not survive; `test_a_breaker_opened_by_assessment_refuses_the_next_entry`
+  proves the breaker refuses an entry when it is open at decision time
+  (`CIRCUIT_OPEN_REJECTED`, no position, `ENTRY_BLOCKED_CIRCUIT_OPEN` audited).
+- **Status:** documented as a known limit; a recovery-debounce policy would be a
+  separate decision
+
+### VB-LIV-006 — Liveness, lease and staleness transitions are auditable
+- **Phase:** Liveness Independence
+- **Category / severity:** Observability / Medium
+- **Component:** `core/version_b_runtime.py`, `core/version_b_paper_driver.py`
+- **Observable change:** **Behavior change.** New audit codes:
+  `MARKET_DATA_QUIET` (WARNING, when the source goes quiet, with
+  `quiet_since`, `expected_resume_at` and `last_event_time`) and
+  `MARKET_DATA_WAIT_ENDED` (INFO). `RUNTIME_STARTED` now records
+  `heartbeat_interval` alongside `lease_seconds` and `holder`, so the policy in
+  force is readable from the trail later. `STALE_DATA` rows raised by the clock
+  carry `source: "liveness_assessment"`, so a stale reading is never confused
+  with a decision-path rejection. The beat itself is durable lease state
+  (`runtime_locks.heartbeat_at`), not a log line.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_liveness_and_staleness_transitions_are_auditable`.
+- **Status:** implemented and verified
+
+### VB-LIV-007 — Liveness policy is operator-settable from `main.py`
+- **Phase:** Liveness Independence
+- **Category / severity:** Architecture / Low
+- **Component:** `main.py`
+- **Observable change:** **Behavior change.** `--heartbeat-interval SEC`
+  (default 60) and `--lease-seconds SEC` (default 600) are exposed, and the run
+  summary reports beat count, quiet windows and total quiet seconds. Both
+  refusal paths are unchanged and still exit `2`.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** Manual run — 200 events with `--heartbeat-interval 300
+  --lease-seconds 900` produced 142 beats and exit 0; `--resume` then skipped
+  200 and delivered 310 (= 510). `TRADING_MODE=paper` and
+  `--version-b-paper` without `--frames-dir` both still exit `2`.
+- **Status:** implemented and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

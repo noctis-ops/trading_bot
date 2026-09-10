@@ -73,6 +73,7 @@ DETERMINISTIC_GROUPS = {
         "test_version_b_paper_driver.ClockSeparationTests",
         "test_version_b_paper_driver.WindowAndBoundaryNegativeControlTests",
         "test_version_b_paper_driver.LeaseAndHeartbeatTests",
+        "test_version_b_paper_driver.LivenessIndependenceTests",
         "test_version_b_paper_driver.DriverParityAndPreservationTests",
     ),
     "integration_acceptance_contract": (

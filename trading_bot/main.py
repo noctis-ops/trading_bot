@@ -122,6 +122,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='الرمز المتداوَل (التشغيل الواحد يملك رمزًا واحدًا حاليًا).',
     )
     parser.add_argument(
+        '--heartbeat-interval', type=float, default=60.0, metavar='SEC',
+        help=(
+            'فترة إثبات الحياة بالثواني (افتراضي 60). تُقاد بالساعة لا بعدد '
+            'أحداث بيانات السوق، فتستمر حتى مع توقّف البيانات.'
+        ),
+    )
+    parser.add_argument(
+        '--lease-seconds', type=float, default=600.0, metavar='SEC',
+        help=(
+            'مدة عقد القفل بالثواني (افتراضي 600). من يتجاوزه دون نبض يُعتبر '
+            'ميتًا ويصبح الاستيلاء على تشغيله ممكنًا ومُسجَّلًا.'
+        ),
+    )
+    parser.add_argument(
         '--takeover', action='store_true',
         help=(
             'استولِ صراحةً على قفل تشغيل يملكه holder ميت. '
@@ -233,6 +247,8 @@ def run_version_b_paper(args) -> None:
         adapter=adapter,
         run_id=args.run_id,
         initial_balance=float(os.getenv('PAPER_INITIAL_BALANCE', '10000')),
+        heartbeat_interval=args.heartbeat_interval,
+        lease_seconds=args.lease_seconds,
         resume=args.resume,
     )
     try:
@@ -257,7 +273,10 @@ def run_version_b_paper(args) -> None:
           f"(متجاوَز كمُعالَج: {report.events_skipped_as_processed})")
     print(f"  سبب التوقف: {report.stopped_reason}")
     print(f"  الساعة: {report.clock_start} → {report.clock_end}")
-    print(f"  heartbeats: {report.heartbeats}")
+    print(f"  heartbeats: {report.heartbeats} "
+          f"(كل {args.heartbeat_interval:g}ث، مستقلّة عن بيانات السوق)")
+    print(f"  فترات صمت البيانات: {report.idle_waits} "
+          f"| إجمالي الصمت: {report.data_quiet_seconds:.0f}ث")
     print(f"  النتائج: {report.outcomes}")
     print(f"  مراكز مفتوحة: {state['open_position_count']} | "
           f"صفقات مغلقة: {state['closed_trade_count']}")

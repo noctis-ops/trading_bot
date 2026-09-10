@@ -379,6 +379,7 @@ class VersionBPaperRuntime:
         resume: bool = False,
         clock: Any | None = None,
         lease_seconds: float | None = None,
+        heartbeat_interval: float = 60.0,
     ):
         from database.version_b_store import RunRecord, VersionBStore
 
@@ -393,6 +394,9 @@ class VersionBPaperRuntime:
         self.stale_after_seconds = float(stale_after_seconds)
         self.data_fault_threshold = int(data_fault_threshold)
         self.lease_seconds = None if lease_seconds is None else float(lease_seconds)
+        # How often the owning process proves it is alive.  A lease is only
+        # meaningful if this is comfortably shorter than the lease itself.
+        self.heartbeat_interval = float(heartbeat_interval)
         # Time is injected, never read from the wall clock inside the hot path:
         # a deterministic run has to be reproducible down to its timestamps.
         self.clock = clock or WallClock()
@@ -507,14 +511,68 @@ class VersionBPaperRuntime:
                 raise NotPrimaryInstance(str(exc)) from exc
         self.started = True
         self.audit("runtime", AuditSeverity.INFO, "RUNTIME_STARTED",
-                   {"holder": self.holder, "lease_seconds": self.lease_seconds})
+                   {"holder": self.holder, "lease_seconds": self.lease_seconds,
+                    "heartbeat_interval": self.heartbeat_interval})
         self.persist_state()
 
     def heartbeat(self) -> None:
-        """Prove the instance is still alive, so its lease stays valid."""
+        """Prove the instance is still alive, so its lease stays valid.
+
+        Liveness is a property of the *process*, so it is deliberately not tied
+        to market-data arrival: a live process waiting on a quiet feed must keep
+        beating, or a supervisor cannot tell it from a dead one.
+        """
         if not self.started:
             return
         self.store.heartbeat(self.run_id, holder=self.holder, now=self.clock.now())
+
+    # ── market-data freshness (independent of process liveness) ───────────
+
+    def _newest_data_time(self) -> datetime | None:
+        """Close time of the newest bar consumed on any timeframe."""
+        newest: datetime | None = None
+        for timeframe, frame in self.frames.items():
+            if frame.empty:
+                continue
+            closed = candle_close_time(frame.index[-1], timeframe).to_pydatetime()
+            if newest is None or closed > newest:
+                newest = closed
+        return newest
+
+    def assess_data_freshness(self, *, now: datetime | None = None) -> float | None:
+        """How stale the newest consumed market data is, against the clock.
+
+        This is the other half of the separation.  ``_process_decision`` can
+        only notice staleness when a decision event happens to arrive, so a feed
+        that simply *stops* was invisible: no events, no assessment, no
+        ``STALE_DATA``, no breaker.  Assessing against the clock instead makes
+        "the data went quiet" detectable on its own schedule.
+
+        Returns the age of the newest data in seconds, or ``None`` when no data
+        has been consumed yet — an empty history at start-up is warm-up, not
+        staleness, and calling it a fault would open the breaker before the
+        first decision.
+
+        Deliberately one-directional: an assessment can register a fault, it
+        never clears one.  Recovery stays event-driven (``on_event``), so there
+        is exactly one path that closes the breaker.
+        """
+        if not self.started:
+            return None
+        newest = self._newest_data_time()
+        if newest is None:
+            return None
+        moment = self.clock.now() if now is None else now
+        age = (moment - newest).total_seconds()
+        if age <= self.stale_after_seconds:
+            return age
+        self._register_data_fault(HealthStatus.STALE, "STALE_DATA", {
+            "assessed_at": moment.isoformat(),
+            "newest_data_time": newest.isoformat(),
+            "stale_by_seconds": age,
+            "source": "liveness_assessment",
+        })
+        return age
 
     def shutdown(self, *, graceful: bool = True) -> None:
         """Persist, release the lock, and stop accepting events.

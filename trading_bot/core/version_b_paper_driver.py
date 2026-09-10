@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,6 +41,7 @@ import pandas as pd
 
 from core.version_b_clock import Clock, DeterministicClock, WallClock
 from core.version_b_runtime import (
+    AuditSeverity,
     DECISION_TIMEFRAME,
     EXIT_TIMEFRAME,
     DeterministicExchangeDouble,
@@ -69,6 +70,18 @@ class MarketDataAdapter(ABC):
     @abstractmethod
     def open(self) -> None:
         """Prepare the source.  Idempotent."""
+
+    def idle_until(self) -> datetime | None:
+        """When this source next expects to be able to produce an event.
+
+        ``None`` (the default) means "ask me again immediately": the next
+        ``next_event`` either returns an event or ends the stream.  A source
+        that can be *quiet* — a live feed waiting on a socket — returns the
+        instant it next expects data.  That is what lets the driver keep
+        heartbeating and keep assessing data freshness while nothing arrives,
+        instead of treating silence as the end of the run.
+        """
+        return None
 
     @abstractmethod
     def next_event(self) -> MarketEvent | None:
@@ -187,6 +200,9 @@ class DriverReport:
     clock_start: datetime | None = None
     clock_end: datetime | None = None
     heartbeats: int = 0
+    idle_waits: int = 0
+    data_quiet_seconds: float = 0.0
+    last_beat: datetime | None = None
 
     def outcome(self, name: str) -> int:
         return self.outcomes.get(name, 0)
@@ -202,6 +218,9 @@ class DriverReport:
             "clock_start": self.clock_start.isoformat() if self.clock_start else None,
             "clock_end": self.clock_end.isoformat() if self.clock_end else None,
             "heartbeats": self.heartbeats,
+            "idle_waits": self.idle_waits,
+            "data_quiet_seconds": self.data_quiet_seconds,
+            "last_beat": self.last_beat.isoformat() if self.last_beat else None,
         }
 
 
@@ -231,13 +250,18 @@ class PaperDriver:
         stale_after_seconds: float = 3600.0,
         data_fault_threshold: int = 2,
         lease_seconds: float | None = 600.0,
-        heartbeat_every: int = 25,
+        heartbeat_interval: float = 60.0,
+        max_idle_waits: int = 64,
         resume: bool = False,
     ):
         self.db_path = Path(db_path)
         self.adapter = adapter
         self.run_id = run_id
-        self.heartbeat_every = max(1, int(heartbeat_every))
+        # Liveness is scheduled by elapsed time, not by how much market data
+        # happens to arrive.  A quiet feed must not make a live process look
+        # dead, so the beat is due on the clock alone.
+        self.heartbeat_interval = float(heartbeat_interval)
+        self.max_idle_waits = int(max_idle_waits)
         self.lease_seconds = lease_seconds
         self.resume = resume
         # None means "seed a deterministic clock from the first event": an
@@ -253,6 +277,8 @@ class PaperDriver:
         self.store = None
         self.report = DriverReport(run_id=run_id or "")
         self._pending: MarketEvent | None = None
+        self._last_beat: datetime | None = None
+        self._quiet_since: datetime | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -287,6 +313,9 @@ class PaperDriver:
         last = self.store.last_processed_event(self.run_id)
         self.report.resumed_after_event = last.event_id if last else None
         self.report.clock_start = self.clock.now()
+        # acquire_lock already stamped heartbeat_at; the next beat is due one
+        # interval later, measured from here rather than from the first event.
+        self._last_beat = self.clock.now()
 
     def shutdown(self, *, graceful: bool = True) -> None:
         """Persist, release the lease, and close the adapter.
@@ -310,22 +339,91 @@ class PaperDriver:
 
     # ── the loop ──────────────────────────────────────────────────────────
 
+    # ── liveness: scheduled by the clock, not by market-data arrival ─────
+
+    def beat(self) -> bool:
+        """Prove the process is alive, on a time schedule.  Returns True if it beat.
+
+        This is the correction.  Liveness used to be a side effect of delivering
+        every Nth event, so a quiet market produced no beats and the lease
+        expired while the process was perfectly alive — a supervisor could not
+        tell it from a dead one.  A beat is now due because *time passed*, which
+        makes it independent of whether any market data arrives.
+        """
+        if not self.started:
+            return False
+        now = self.clock.now()
+        if (self._last_beat is not None
+                and (now - self._last_beat).total_seconds() < self.heartbeat_interval):
+            return False
+        self.runtime.heartbeat()
+        self._last_beat = now
+        self.report.last_beat = now
+        self.report.heartbeats += 1
+        return True
+
+    def _wait_for_source(self, until: datetime | pd.Timestamp | None) -> bool:
+        """The feed went quiet.  Liveness and freshness keep running regardless.
+
+        Silence used to be ambiguous: a live process waiting for data and a dead
+        one looked identical from the lease.  So the driver walks the clock
+        through the quiet window in heartbeat-sized steps, beating and assessing
+        data freshness at each one.  A stopped *feed* therefore produces
+        ``STALE_DATA`` and a breaker that blocks new entries; a dead *process*
+        produces an expiring lease.  Two different conditions, two different
+        observable consequences.
+        """
+        resume_at = self.adapter.idle_until()
+        if resume_at is None:
+            return False
+        deadline = self._as_dt(resume_at)
+        if until is not None:
+            deadline = min(deadline, self._as_dt(until))
+        if deadline <= self.clock.now():
+            return False
+        if self.report.idle_waits >= self.max_idle_waits:
+            self.report.stopped_reason = "source_idle"
+            return False
+        if self._quiet_since is None:
+            self._quiet_since = self.clock.now()
+            last_event = self.runtime.health.last_event_time
+            self.runtime.audit("data", AuditSeverity.WARNING, "MARKET_DATA_QUIET", {
+                "quiet_since": self._quiet_since.isoformat(),
+                "expected_resume_at": deadline.isoformat(),
+                "last_event_time": last_event.isoformat() if last_event is not None else None,
+            })
+        self.report.idle_waits += 1
+        while self.clock.now() < deadline:
+            step = self.clock.now() + timedelta(seconds=self.heartbeat_interval)
+            self.clock.advance_to(min(step, deadline))
+            self.beat()
+            self.runtime.assess_data_freshness()
+        if self._quiet_since is not None:
+            self.report.data_quiet_seconds += (
+                self.clock.now() - self._quiet_since).total_seconds()
+            self._quiet_since = None
+            self.runtime.audit("data", AuditSeverity.INFO, "MARKET_DATA_WAIT_ENDED",
+                               {"ended_at": self.clock.now().isoformat()})
+        return True
+
     def step(self) -> EventOutcome | None:
-        """Deliver exactly one event.  Returns None when the source is done."""
+        """Deliver exactly one event.  Returns None only when the source is done.
+
+        A quiet source is not a finished one, so ``None`` has to mean exactly
+        that: if the adapter reports it is merely waiting, the driver waits it
+        out — beating and assessing freshness the whole time — and then takes
+        the event that was due.
+        """
         if not self.started:
             raise RuntimeError("driver is not started")
+        self.beat()
         event = self._take_event()
+        if event is None and self._wait_for_source(None):
+            self.beat()
+            event = self._take_event()
         if event is None:
             return None
-        self.clock.advance_to(self._event_time(event))
-        outcome = self.runtime.on_event(event)
-        self.report.events_delivered += 1
-        key = outcome.value
-        self.report.outcomes[key] = self.report.outcomes.get(key, 0) + 1
-        if self.report.events_delivered % self.heartbeat_every == 0:
-            self.runtime.heartbeat()
-            self.report.heartbeats += 1
-        return outcome
+        return self._deliver(event)
 
     def run(
         self,
@@ -336,14 +434,21 @@ class PaperDriver:
         """Drive events until the source ends, a count is reached, or a time."""
         if not self.started:
             raise RuntimeError("driver is not started")
+        self.report.stopped_reason = ""
         delivered = 0
         while True:
             if max_events is not None and delivered >= max_events:
                 self.report.stopped_reason = "max_events"
                 break
+            # Beat before asking for data: liveness must not depend on the
+            # answer, or a source that blocks or goes quiet starves the lease.
+            self.beat()
             event = self._take_event()
             if event is None:
-                self.report.stopped_reason = "source_exhausted"
+                if self._wait_for_source(until):
+                    continue
+                if not self.report.stopped_reason:
+                    self.report.stopped_reason = "source_exhausted"
                 break
             if until is not None and self._event_time(event) > self._as_dt(until):
                 # Not consumed: it belongs to the next run, so it is pushed back.
@@ -363,9 +468,6 @@ class PaperDriver:
         self.report.events_delivered += 1
         key = outcome.value
         self.report.outcomes[key] = self.report.outcomes.get(key, 0) + 1
-        if self.report.events_delivered % self.heartbeat_every == 0:
-            self.runtime.heartbeat()
-            self.report.heartbeats += 1
         return outcome
 
     def _take_event(self) -> MarketEvent | None:

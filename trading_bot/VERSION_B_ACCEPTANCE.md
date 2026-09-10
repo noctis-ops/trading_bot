@@ -4,8 +4,8 @@ This document defines the machine-checkable gate required before any Historical 
 
 ## Current remediation gate record
 
-As of 2026-09-08, the automated gate reports **PASS** with 146 mandatory
-assertions passed, 0 failed, 0 errors, 0 skipped across 16 modules.
+As of 2026-09-10, the automated gate reports **PASS** with 171 mandatory
+assertions passed, 0 failed, 0 errors, 0 skipped across 17 modules.
 `baseline_collected` remains `false`.
 
 The Version A object checks previously failed for an environmental reason: a
@@ -25,11 +25,12 @@ clone: `restored: true`.
 | Restart recovery contract | `PASS` | Computed from `RestartRecoveryTests`: offline fill, crash between fill and event, unresolved reporting, vanished resting stop, idempotent re-recovery, hydrated accounting |
 | Baseline readiness contract | `PASS` | Computed from `LineageTests`, `MetricDefinitionTests`, `ArtifactContractTests`, `ReplayLineageTests`, `ReproducibilityTests`: artifact contract, reproducible lineage, pinned drawdown, legacy separation, aggregation guard |
 | Operational acceptance contract | `PASS` | Computed from the eight `test_version_b_operational_acceptance` classes: bar-by-bar operation, crash/restart/continue, duplicate events, venue degradation, bad data, single instance, operational controls, and event-driven vs replay parity |
+| Paper driver contract | `PASS` | Computed from the six `test_version_b_paper_driver` classes: end-to-end start→clock→event→decision→risk→intent→fill→lifecycle→DB→restart→resume **through the driver**, the `MarketDataAdapter` boundary, clock separation, window/boundary negative controls, live heartbeat and lease, and preserved parity plus guarantees |
 | Integration acceptance contract | `PASS` | Computed from `OnePathNotParallelImplementationTests`, `StrategyRiskExecutionEndToEndTests`, `RestartDuringOpenLifecycleTests`, `LegacyFallbackClosureTests`: one unified path, decision→DB end to end, restart from rows alone, legacy fallback closure |
 | Runtime/exchange protection acknowledgement | `UNKNOWN` | Requires a real venue: create → fetch/ack confirmation and `clientOrderId` deduplication |
 | Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction and deterministic reconciliation are covered; a live-account restart drill is not |
 
-The seven `PASS` rows are computed from the junit report per test group. The two
+The eight `PASS` rows are computed from the junit report per test group. The two
 `UNKNOWN` rows are `UNKNOWN` by construction: a network-free gate never infers
 exchange evidence, and the gate publishes the evidence each one requires under
 `residual_unknowns`. A residual `UNKNOWN` does not authorize Live.
@@ -52,6 +53,17 @@ byte-identical to the pre-sabotage source.
 exactly the two idempotency tests. Reordering the feed so a decision precedes
 the 5m bar closing at the same instant fails the replay-parity test. Both
 sabotages were reverted and verified byte-identical.
+
+**Paper driver negative controls.** Making `VersionBPaperRuntime.run()` silently
+accept a window fails `test_handing_the_runtime_a_window_fails`. Letting
+`DeterministicClock` move backwards fails both clock-boundary tests. Disabling
+the driver's consumed-event check — so a restart replays the window instead of
+resuming after the last persisted event — fails both end-to-end tests, and fails
+them with `ClockCannotRewind`, i.e. the clock catches the replay independently of
+the store. Removing the driver's heartbeat call fails
+`test_the_driver_heartbeats_and_the_lease_advances`, which is what keeps the
+lease from being dead code. All four sabotages were reverted and verified
+byte-identical to the pre-sabotage source.
 
 **Tree cleanliness.** Running the full suite and the gate now changes **no
 tracked file**. Previously every run appended to the tracked `logs/bot.log`,

@@ -88,6 +88,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         '--version', action='store_true',
         help='اطبع معلومات الإصدار والاستراتيجية الحالية ثم اخرج.',
     )
+    # ── Version B Paper: المسار التشغيلي المعتمد ────────────────────────
+    parser.add_argument(
+        '--version-b-paper', action='store_true',
+        help=(
+            'شغّل Paper عبر مسار Version B التشغيلي '
+            '(MarketDataAdapter → Clock → PaperDriver → VersionBPaperRuntime). '
+            'هذا هو المسار الوحيد المعتمد للـPaper؛ المسار القديم مرفوض.'
+        ),
+    )
+    parser.add_argument(
+        '--frames-dir', type=str, default=None, metavar='DIR',
+        help=(
+            'مجلد يحتوي 1h.csv و15m.csv و5m.csv '
+            '(الأعمدة: timestamp,open,high,low,close[,volume]). '
+            'مطلوب مع --version-b-paper. لا يُفتح أي اتصال شبكي.'
+        ),
+    )
+    parser.add_argument(
+        '--db', type=str, default=None, metavar='PATH',
+        help='مسار قاعدة VersionBStore (افتراضي: data/version_b_paper.sqlite).',
+    )
+    parser.add_argument(
+        '--run-id', type=str, default=None, metavar='ID',
+        help='معرّف التشغيل؛ يُنشَأ جديد إن لم يُمرَّر.',
+    )
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='استأنف تشغيلًا موجودًا من آخر حدث مُخزَّن بدل بدئه من جديد.',
+    )
+    parser.add_argument(
+        '--symbol', type=str, default='BTC/USDT', metavar='SYM',
+        help='الرمز المتداوَل (التشغيل الواحد يملك رمزًا واحدًا حاليًا).',
+    )
+    parser.add_argument(
+        '--takeover', action='store_true',
+        help=(
+            'استولِ صراحةً على قفل تشغيل يملكه holder ميت. '
+            'يُسجَّل كحدث CRITICAL في الـaudit trail.'
+        ),
+    )
     return parser
 
 
@@ -164,6 +204,72 @@ def confirm_live_mode() -> bool:
 # نقطة الدخول
 # ─────────────────────────────────────────────────────────
 
+def run_version_b_paper(args) -> None:
+    """شغّل Paper عبر المسار التشغيلي لـ Version B — بلا legacy وبلا شبكة.
+
+    المصدر الحالي deterministic (ملفات CSV محلية) لأن توصيل feed حقيقي غير
+    مسموح في هذه المرحلة. الحدود نفسه صحيح: استبدل الـadapter بـimplementation
+    حقيقي ولن يتغيّر شيء في القرار أو المخاطرة أو التنفيذ أو التخزين.
+    """
+    from core.version_b_paper_driver import DeterministicMarketAdapter, PaperDriver
+
+    if not args.frames_dir:
+        print("\n❌ --version-b-paper يتطلب --frames-dir "
+              "يحوي 1h.csv و15m.csv و5m.csv.")
+        print("   لا يوجد market-data feed شبكي مسموح في هذه المرحلة، "
+              "والمسار القديم للـPaper مرفوض.")
+        sys.exit(2)
+
+    db_path = args.db or str(Path('data') / 'version_b_paper.sqlite')
+    try:
+        adapter = DeterministicMarketAdapter.from_directory(
+            args.frames_dir, symbol=args.symbol)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"\n❌ مصدر البيانات غير صالح: {e}")
+        sys.exit(2)
+
+    driver = PaperDriver(
+        db_path=db_path,
+        adapter=adapter,
+        run_id=args.run_id,
+        initial_balance=float(os.getenv('PAPER_INITIAL_BALANCE', '10000')),
+        resume=args.resume,
+    )
+    try:
+        driver.start(takeover=args.takeover)
+    except Exception as e:
+        print(f"\n⛔ تعذّر بدء التشغيل: {e}")
+        sys.exit(3)
+
+    print(f"\n✅ Version B Paper | run_id={driver.run_id} | db={db_path}")
+    print(f"   استئناف من آخر حدث: {driver.report.resumed_after_event or '(بداية جديدة)'}")
+    try:
+        report = driver.run(max_events=args.iterations)
+    except KeyboardInterrupt:
+        print("\n⏹️  إيقاف مطلوب — إغلاق لطيف...")
+        driver.shutdown()
+        driver.close()
+        sys.exit(0)
+
+    state = driver.runtime.operational_state()
+    print(f"\n── نتيجة التشغيل ──")
+    print(f"  أحداث مُسلَّمة: {report.events_delivered} "
+          f"(متجاوَز كمُعالَج: {report.events_skipped_as_processed})")
+    print(f"  سبب التوقف: {report.stopped_reason}")
+    print(f"  الساعة: {report.clock_start} → {report.clock_end}")
+    print(f"  heartbeats: {report.heartbeats}")
+    print(f"  النتائج: {report.outcomes}")
+    print(f"  مراكز مفتوحة: {state['open_position_count']} | "
+          f"صفقات مغلقة: {state['closed_trade_count']}")
+    print(f"  الرصيد: {state['balance']:.2f} | "
+          f"circuit_open: {state['health']['circuit_open']}")
+    alerts = driver.store.audit_trail(driver.run_id, severity='CRITICAL')
+    if alerts:
+        print(f"  ⚠️  أحداث CRITICAL: {[a.code for a in alerts]}")
+    driver.shutdown()
+    driver.close()
+
+
 def main():
     load_dotenv()   # قبل أي قراءة لـ os.getenv في هذا الملف
 
@@ -171,6 +277,10 @@ def main():
 
     if args.version:
         print_version()
+        sys.exit(0)
+
+    if args.version_b_paper:
+        run_version_b_paper(args)
         sys.exit(0)
 
     print_welcome_banner()

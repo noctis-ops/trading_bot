@@ -729,17 +729,52 @@ class VersionBStore:
     # purpose: a lock, an alert, and "which events did I already execute" are
     # exactly the things that must not be reconstructed from memory.
 
+    def lock_is_expired(self, run_id: str, *, now: datetime,
+                        lease_seconds: float) -> bool:
+        """True when the current holder has not heartbeated within the lease.
+
+        A lease is what turns "another process holds this" from a permanent
+        deadlock after a crash into a recoverable condition — without letting a
+        live second instance steal the account.
+        """
+        existing = self.lock_holder(run_id)
+        if existing is None:
+            return False
+        reference = existing.heartbeat_at or existing.acquired_at
+        if reference is None:
+            return True
+        # The DB contract is naive-UTC (_dt); compare in that space so an
+        # injected aware clock and a stored naive stamp never mix.
+        left, right = _dt(now), _dt(reference)
+        return (left - right).total_seconds() > float(lease_seconds)
+
     def acquire_lock(self, *, run_id: str, holder: str,
-                     now: datetime | None = None) -> RuntimeLockRecord:
-        """Take ownership of a run, refusing if another holder still owns it."""
+                     now: datetime | None = None,
+                     lease_seconds: float | None = None,
+                     allow_expired_takeover: bool = False) -> RuntimeLockRecord:
+        """Take ownership of a run, refusing if another holder still owns it.
+
+        With ``allow_expired_takeover`` a holder whose heartbeat is older than
+        the lease is treated as dead.  That is the only automatic takeover; a
+        holder still inside its lease is never displaced.
+        """
         stamp = _dt(now) or datetime.now(timezone.utc)
         existing = RuntimeLockRecord.get_or_none(RuntimeLockRecord.run == run_id)
         if existing is not None:
             if existing.released_at is None and existing.holder != holder:
-                raise LockHeldError(
-                    f"run {run_id} is owned by {existing.holder} since "
-                    f"{existing.acquired_at.isoformat()}"
+                expired = (
+                    allow_expired_takeover
+                    and lease_seconds is not None
+                    and self.lock_is_expired(run_id, now=stamp,
+                                             lease_seconds=lease_seconds)
                 )
+                if not expired:
+                    raise LockHeldError(
+                        f"run {run_id} is owned by {existing.holder} since "
+                        f"{existing.acquired_at.isoformat()}"
+                    )
+                self.release_lock(run_id, holder=existing.holder, now=stamp)
+                existing = RuntimeLockRecord.get_by_id(run_id)
             if existing.released_at is None:
                 # Same holder re-acquiring after a crash: refresh, do not fork.
                 RuntimeLockRecord.update(heartbeat_at=stamp).where(

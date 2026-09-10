@@ -45,6 +45,7 @@ from core.external_execution import (
     OrderIntent,
 )
 from core.version_b_paper import VersionBPaperEngine
+from core.version_b_clock import WallClock
 from core.version_b_recovery import recover_unified_state
 from data.time_alignment import DataStatus, align_timeframes, candle_close_time
 
@@ -104,6 +105,15 @@ class RuntimeNotRunning(RuntimeError_):
 
 class StaleDataRejected(RuntimeError_):
     """A decision was refused because the data was too old to trade on."""
+
+
+class WindowRejected(RuntimeError_):
+    """Someone tried to hand the runtime a whole window of bars.
+
+    The operational runtime ingests one event at a time.  Accepting a frame
+    would reintroduce exactly the batch shape this module exists to replace,
+    and would hand the engine data it has not been told the time of.
+    """
 
 
 @dataclass(frozen=True)
@@ -367,6 +377,8 @@ class VersionBPaperRuntime:
         stale_after_seconds: float = 3600.0,
         data_fault_threshold: int = 2,
         resume: bool = False,
+        clock: Any | None = None,
+        lease_seconds: float | None = None,
     ):
         from database.version_b_store import RunRecord, VersionBStore
 
@@ -380,6 +392,10 @@ class VersionBPaperRuntime:
         self.exchange = exchange or DeterministicExchangeDouble()
         self.stale_after_seconds = float(stale_after_seconds)
         self.data_fault_threshold = int(data_fault_threshold)
+        self.lease_seconds = None if lease_seconds is None else float(lease_seconds)
+        # Time is injected, never read from the wall clock inside the hot path:
+        # a deterministic run has to be reproducible down to its timestamps.
+        self.clock = clock or WallClock()
         self.started = False
         self.shutdown_requested = False
 
@@ -446,8 +462,31 @@ class VersionBPaperRuntime:
         """
         if self.started:
             return
+        # Snapshot the incumbent before acquiring: once the store replaces a
+        # dead holder the row already reads as ours, and an unaudited takeover
+        # is indistinguishable from two processes on one account.
+        incumbent = self.store.lock_holder(self.run_id)
+        previous = None
+        if incumbent is not None and incumbent.holder != self.holder:
+            previous = {
+                "previous_holder": incumbent.holder,
+                "previous_heartbeat_at": (
+                    incumbent.heartbeat_at.isoformat()
+                    if incumbent.heartbeat_at else None),
+            }
         try:
-            self.store.acquire_lock(run_id=self.run_id, holder=self.holder)
+            self.store.acquire_lock(
+                run_id=self.run_id, holder=self.holder, now=self.clock.now(),
+                lease_seconds=self.lease_seconds,
+                allow_expired_takeover=self.lease_seconds is not None,
+            )
+            if previous is not None:
+                self.audit("runtime", AuditSeverity.CRITICAL, "LOCK_TAKEN_OVER", {
+                    **previous,
+                    "new_holder": self.holder,
+                    "mechanism": "lease_expired",
+                    "lease_seconds": self.lease_seconds,
+                })
         except Exception as exc:
             existing = self.store.lock_holder(self.run_id)
             if takeover and existing is not None:
@@ -455,17 +494,27 @@ class VersionBPaperRuntime:
                     "previous_holder": existing.holder,
                     "new_holder": self.holder,
                     "acquired_at": existing.acquired_at.isoformat(),
+                    "mechanism": "explicit_takeover",
                 })
                 self.store.release_lock(self.run_id, holder=existing.holder)
-                self.store.acquire_lock(run_id=self.run_id, holder=self.holder)
+                self.store.acquire_lock(
+                    run_id=self.run_id, holder=self.holder, now=self.clock.now(),
+                    lease_seconds=self.lease_seconds)
             else:
                 self._set_health(self.health.database, HealthStatus.FAILED, str(exc))
                 self.audit("runtime", AuditSeverity.CRITICAL, "LOCK_REFUSED",
                            {"error": str(exc)})
                 raise NotPrimaryInstance(str(exc)) from exc
         self.started = True
-        self.audit("runtime", AuditSeverity.INFO, "RUNTIME_STARTED", {"holder": self.holder})
+        self.audit("runtime", AuditSeverity.INFO, "RUNTIME_STARTED",
+                   {"holder": self.holder, "lease_seconds": self.lease_seconds})
         self.persist_state()
+
+    def heartbeat(self) -> None:
+        """Prove the instance is still alive, so its lease stays valid."""
+        if not self.started:
+            return
+        self.store.heartbeat(self.run_id, holder=self.holder, now=self.clock.now())
 
     def shutdown(self, *, graceful: bool = True) -> None:
         """Persist, release the lock, and stop accepting events.
@@ -493,7 +542,7 @@ class VersionBPaperRuntime:
         if result is not None:
             self._mark_event(
                 f"{self.symbol}:end-of-data:{event_time.isoformat()}",
-                EXIT_TIMEFRAME, event_time, EventOutcome.END_OF_DATA,
+                "END_OF_DATA", event_time, EventOutcome.END_OF_DATA,
             )
         self.persist_state()
         return result
@@ -548,6 +597,20 @@ class VersionBPaperRuntime:
                          processed_at=event.emitted_at)
         self.persist_state()
         return outcome
+
+    def run(self, *_refused_window: Any, **_also_refused: Any) -> None:
+        """Refuse window ingestion, loudly.
+
+        ``VersionBPaperPipeline.run`` takes three frames because it is a
+        measurement replay.  The operational runtime takes one event at a time;
+        a caller that reaches for the batch signature here is about to hand the
+        engine data with no event boundary, so it is stopped.
+        """
+        raise WindowRejected(
+            "VersionBPaperRuntime is event-driven; feed it MarketEvent objects "
+            "through on_event()/a PaperDriver. Use VersionBPaperPipeline.run for "
+            "a measurement replay."
+        )
 
     def run_stream(self, events: Iterable[MarketEvent]) -> dict[str, EventOutcome, int]:
         """Convenience: feed a whole stream one event at a time."""
@@ -838,7 +901,7 @@ class VersionBPaperRuntime:
     def _set_health(self, component: ComponentHealth, status: HealthStatus, detail: str) -> None:
         component.status = status
         component.detail = detail
-        component.updated_at = datetime.now(timezone.utc)
+        component.updated_at = self.clock.now()
 
     def _register_data_fault(self, status: HealthStatus, code: str,
                              detail: Mapping[str, Any]) -> None:
@@ -942,7 +1005,7 @@ class VersionBPaperRuntime:
             "pending_unknown_intents": list(self.pending_unknown_intents),
             "health": self.health.as_dict(),
             "positions": sorted(positions, key=lambda item: item["trade_id"]),
-            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "captured_at": self.clock.now().isoformat(),
         }
 
     def persist_state(self) -> dict[str, Any]:
@@ -989,4 +1052,5 @@ __all__ = [
     "RuntimeNotRunning",
     "StaleDataRejected",
     "VersionBPaperRuntime",
+    "WindowRejected",
 ]

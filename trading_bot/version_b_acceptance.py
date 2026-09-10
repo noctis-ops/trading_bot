@@ -42,6 +42,7 @@ TEST_FILES = [
     "test_version_b_baseline_readiness.py",
     "test_version_b_integration_acceptance.py",
     "test_version_b_operational_acceptance.py",
+    "test_version_b_paper_driver.py",
     "test_legacy_paper_exchange.py",
 ]
 
@@ -65,6 +66,14 @@ DETERMINISTIC_GROUPS = {
         "test_version_b_operational_acceptance.SingleInstanceAndLegacyTests",
         "test_version_b_operational_acceptance.OperationalControlsTests",
         "test_version_b_operational_acceptance.EventDrivenReplayParityTests",
+    ),
+    "paper_driver_contract": (
+        "test_version_b_paper_driver.DriverEndToEndTests",
+        "test_version_b_paper_driver.MarketDataAdapterBoundaryTests",
+        "test_version_b_paper_driver.ClockSeparationTests",
+        "test_version_b_paper_driver.WindowAndBoundaryNegativeControlTests",
+        "test_version_b_paper_driver.LeaseAndHeartbeatTests",
+        "test_version_b_paper_driver.DriverParityAndPreservationTests",
     ),
     "integration_acceptance_contract": (
         "test_version_b_integration_acceptance.OnePathNotParallelImplementationTests",

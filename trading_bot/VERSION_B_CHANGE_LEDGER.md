@@ -709,6 +709,209 @@ after the initial component implementation.
   `test_restart_after_tp1_and_breakeven_keeps_tp2_protection_alive`.
 - **Status:** implemented and verified
 
+### VB-DRV-001 — Market data boundary extracted from the runtime
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Architecture / Informational
+- **Component:** `core/version_b_paper_driver.py`, `core/version_b_runtime.py`
+- **Observable change:** Market data now reaches the runtime through
+  `MarketDataAdapter` (`open` / `next_event` / `close`), an interface whose
+  contract is *one `MarketEvent` at a time*. `DeterministicMarketFeed` is
+  demoted to an implementation detail of `DeterministicMarketAdapter`; it is no
+  longer the runtime's only source. No method on the interface can return a
+  frame, and a new adapter is a constructor argument — not a runtime change.
+  `LiveMarketAdapter` exists as the documented boundary and raises
+  `NotImplementedError` on construction: no network market-data source is
+  authorised in this phase, so Binance is deliberately **not** wired.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_deterministic_feed_is_only_one_implementation`,
+  `test_a_custom_adapter_drives_the_same_runtime_unchanged`,
+  `test_the_live_adapter_boundary_refuses_to_be_constructed`.
+- **Status:** implemented and verified
+
+### VB-DRV-002 — Paper driver/scheduler; the runtime is no longer test-driven
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Architecture / Informational
+- **Component:** `core/version_b_paper_driver.py`
+- **Observable change:** `PaperDriver` owns the operating loop: it opens the
+  source, seeds the clock, takes the single-instance lock, and delivers events
+  **event-by-event in time order** (`step()` / `run(max_events, until)`),
+  returning a `DriverReport` derived from the runtime rather than from memory.
+  Event position is durable in `VersionBStore`, so a restart resumes *after*
+  the last persisted event instead of replaying the window. Before this the
+  loop existed only inside the test harness.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_start_clock_event_decision_risk_intent_fill_lifecycle_db_restart_resume`,
+  `test_shutdown_does_not_lose_the_event_position`,
+  `test_the_driver_never_holds_a_window`.
+- **Status:** implemented and verified
+
+### VB-DRV-003 — Clock separated from the market feed
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Architecture / Informational
+- **Component:** `core/version_b_clock.py` (new), `core/version_b_runtime.py`
+- **Observable change:** `Clock` (`now` / `advance_to`) is its own module so the
+  driver and the runtime can both depend on it without a cycle. The runtime
+  takes `clock=` and stamps **every** durable timestamp (lock, heartbeat,
+  health, operational state, audit) from it. Tests run on
+  `DeterministicClock`, which refuses to move backwards
+  (`ClockCannotRewind`); production can take `WallClock`. There is no
+  wall-clock dependence anywhere in the deterministic path.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_deterministic_clock_never_reads_the_wall_clock`,
+  `test_the_clock_refuses_to_move_backwards`,
+  `test_durable_timestamps_come_from_the_injected_clock`,
+  `test_a_wall_clock_can_be_substituted_without_touching_the_runtime`.
+- **Status:** implemented and verified
+
+### VB-DRV-004 — Whole-window ingestion into the runtime is now refused
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Correctness / High
+- **Component:** `core/version_b_runtime.py`
+- **Observable change:** **Behavior change.** `VersionBPaperRuntime.run(...)`
+  raises `WindowRejected` instead of being an available batch entry point, and
+  its signature no longer names a `frames` parameter, so there is no public
+  method on the runtime that accepts a frame or a set of frames. Batch replay
+  remains available *only* through the separate `VersionBPaperPipeline` oracle,
+  which is the parity reference and never the operating path.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_handing_the_runtime_a_window_fails`,
+  `test_the_runtime_exposes_no_batch_ingestion_path`,
+  `test_the_driver_has_no_window_entry_point_either`,
+  `test_an_adapter_that_returns_a_window_is_not_a_valid_source`. Negative
+  control: restoring a silent `run()` fails
+  `test_handing_the_runtime_a_window_fails`; disabling the consumed-event check
+  so a restart replays the window fails both end-to-end tests with
+  `ClockCannotRewind`.
+- **Status:** implemented and verified
+
+### VB-DRV-005 — `main.py` runs Version B Paper only through the driver
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Architecture / Medium
+- **Component:** `main.py`
+- **Observable change:** **Behavior change.** `main.py --version-b-paper
+  --frames-dir DIR` starts a real Paper run through
+  `MarketDataAdapter → Clock → PaperDriver → VersionBPaperRuntime`, with
+  `--db`, `--run-id`, `--resume`, `--symbol`, `--takeover` and `--iterations`.
+  There is **no fallback to Legacy Paper**: a missing or invalid `--frames-dir`
+  exits `2` with a refusal, and `TRADING_MODE=paper` without
+  `allow_legacy_paper` still exits `2`. The source is local CSV because no
+  network feed is authorised; the boundary is the adapter, so replacing it does
+  not touch the runtime.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** Manual run — `main.py --version-b-paper --frames-dir /tmp/frames
+  --db /tmp/main_paper.sqlite --run-id MAIN-1` delivered 510 events, clocked
+  `2025-12-30T18:10Z → 2026-01-01T01:00Z`, emitted 20 heartbeats and exited 0.
+  The real `TradingStrategy` correctly rejected all 119 decisions as
+  `INSUFFICIENT_WARMUP` (it requires 200 1h/15m bars; the fixture has 30/120),
+  which is the data-quality gate working, not a driver fault. Refusal paths
+  verified at exit code 2.
+- **Status:** implemented and verified
+
+### VB-DRV-006 — Heartbeat/lease activated, not dead code
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Correctness / Medium
+- **Component:** `core/version_b_paper_driver.py`, `core/version_b_runtime.py`,
+  `database/version_b_store.py`
+- **Observable change:** **Behavior change.** `store.heartbeat()` was written
+  and never called. The driver now heartbeats every `heartbeat_every` events
+  (default 25) through the injected clock, and the runtime passes
+  `lease_seconds` (default 600) when taking the lock. A holder **inside** its
+  lease is never displaced; a holder whose heartbeat is older than the lease is
+  treated as dead and may be replaced, with the takeover recorded as a CRITICAL
+  `LOCK_TAKEN_OVER` audit row. A crashed process no longer deadlocks the
+  account permanently, and a live second instance still cannot steal it.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_the_driver_heartbeats_and_the_lease_advances`,
+  `test_a_holder_inside_its_lease_is_never_displaced`,
+  `test_a_holder_past_its_lease_can_be_replaced`. Negative control: removing
+  the driver's heartbeat call fails
+  `test_the_driver_heartbeats_and_the_lease_advances`.
+- **Status:** implemented and verified
+
+### VB-DRV-007 — Defect: lease comparison mixed naive and aware datetimes
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Correctness / High (defect found while testing)
+- **Component:** `database/version_b_store.py`
+- **Observable change:** **Behavior change; fixes a defect.** `lock_is_expired`
+  normalised the stored `heartbeat_at` to UTC-aware and then subtracted
+  `_dt(now)`, but `_dt()` deliberately stores **naive** UTC (the DB contract).
+  Any caller passing an aware clock raised `TypeError: can't subtract
+  offset-naive and offset-aware datetimes`, which `start()` re-raised as
+  `NotPrimaryInstance` — i.e. an expired lease was reported as "a live instance
+  owns this account", permanently deadlocking the run. The comparison now
+  happens in naive-UTC on both sides.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_a_holder_past_its_lease_can_be_replaced` failed with the
+  `TypeError` before the fix and passes after.
+- **Status:** implemented and verified
+
+### VB-DRV-008 — Defect: clock seeding bypassed the consumed-event check
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Correctness / High (defect found while testing)
+- **Component:** `core/version_b_paper_driver.py`
+- **Observable change:** **Behavior change; fixes a defect.** `start()` peeks
+  the first event to seed `DeterministicClock` and buffers it. `_take_event()`
+  returned that buffered event **without** checking `is_event_processed`, so a
+  resumed driver re-delivered the very first event of the window and reported
+  it as newly delivered (509 skipped / 1 delivered, instead of 510 / 0). The
+  runtime's own duplicate guard caught it downstream, so no trade was doubled —
+  but the resume position the driver reported was wrong. Buffered events now go
+  through the same consumed-event check as any other.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** Reproduced before the fix (resume delivered 1, skipped 509);
+  after the fix `test_shutdown_does_not_lose_the_event_position` asserts
+  `skipped == consumed` and `delivered == 510 - consumed`.
+- **Status:** implemented and verified
+
+### VB-DRV-009 — Defect: END_OF_DATA marker was written with timeframe `5m`
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Correctness / Low (defect found while testing)
+- **Component:** `core/version_b_runtime.py`
+- **Observable change:** **Behavior change; fixes a defect.**
+  `close_at_end_of_data` recorded its synthetic marker event with
+  `timeframe="5m"`. `last_processed_event` orders by `open_time`, and resume
+  reports whatever that returns, so the marker was presented to an operator as
+  a 5m market bar it never was. It is now labelled `END_OF_DATA`.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_shutdown_does_not_lose_the_event_position` asserts the
+  resumed driver reports the last *real* event id.
+- **Status:** implemented and verified
+
+### VB-DRV-010 — Defect: automatic lease takeover was silent
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Observability / High (defect found while testing)
+- **Component:** `core/version_b_runtime.py`
+- **Observable change:** **Behavior change; fixes a defect.** Expired-lease
+  takeover happened inside `store.acquire_lock()`, which writes no audit row.
+  Only the *explicit* `takeover=True` path audited `LOCK_TAKEN_OVER`, so an
+  automatic takeover — the one case where a second process takes a live
+  account — left no record and was indistinguishable from two processes
+  trading one account. `start()` now snapshots the incumbent before acquiring
+  and audits `LOCK_TAKEN_OVER` with `mechanism` =
+  `lease_expired` / `explicit_takeover`, the previous holder and its last
+  heartbeat.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_a_holder_past_its_lease_can_be_replaced` failed with
+  `'LOCK_TAKEN_OVER' not found in ['RUNTIME_STARTED', 'RUNTIME_STARTED']`
+  before the fix and passes after.
+- **Status:** implemented and verified
+
+### VB-DRV-011 — Known limit retained: one runtime owns one symbol
+- **Phase:** Paper Driver Layer
+- **Category / severity:** Scope / Informational
+- **Component:** `core/version_b_runtime.py`, `core/version_b_paper_driver.py`
+- **Observable change:** No behavior change; recorded as an explicit limit.
+  `VersionBPaperRuntime.symbol` is a single string, so one runtime instance
+  trades one symbol and events for any other symbol return `IGNORED`. Widening
+  to multi-symbol would change the identity of the single-instance lock, the
+  recovery report and the parity oracle, so it is **out of scope** here and
+  documented as a known limit rather than silently widened.
+- **Strategy rules/parameters changed:** No.
+- **Evidence:** `test_single_symbol_remains_an_explicit_known_limit` asserts
+  the cross-symbol `IGNORED` outcome *and* that the limit stays documented in
+  the driver source.
+- **Status:** documented, intentionally not changed
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

@@ -86,8 +86,10 @@ class EventOutcome(str, Enum):
     IGNORED = "IGNORED"
 
 
-# Data faults that clear themselves once good data resumes.  A breaker opened
-# for these closes on the next healthy decision, and says so in the audit trail.
+# Data faults that clear themselves once good data resumes.  "Resumes" means the
+# decision timeframe is fresh again — not merely that some bar arrived.  A
+# breaker opened for these closes on the first event that satisfies that, and
+# says so in the audit trail.
 _AUTO_RESET_FAULTS = frozenset({"STALE_DATA", "DATA_NOT_VALID", "OUT_OF_ORDER_EVENT"})
 
 
@@ -638,14 +640,7 @@ class VersionBPaperRuntime:
                 outcome = self._process_decision(event)
             else:
                 outcome = EventOutcome.IGNORED
-            self._set_health(self.health.data, HealthStatus.HEALTHY, "")
-            self.health.consecutive_data_faults = 0
-            if self.health.circuit_open and self.health.circuit_reason in _AUTO_RESET_FAULTS:
-                self.health.circuit_open = False
-                reason = self.health.circuit_reason
-                self.health.circuit_reason = ""
-                self.audit("data", AuditSeverity.WARNING, "CIRCUIT_BREAKER_CLOSED",
-                           {"previous_reason": reason})
+            self._recover_data_health()
         except Exception as exc:  # a component failed: record it, do not hide it
             self._set_health(self.health.database, HealthStatus.FAILED, str(exc))
             self.audit("database", AuditSeverity.CRITICAL, "PERSIST_FAILED",
@@ -989,6 +984,57 @@ class VersionBPaperRuntime:
             return float("inf")
         age = decision_time - candle_close_time(frame.index[-1], DECISION_TIMEFRAME)
         return max(0.0, age.total_seconds())
+
+    def _decision_data_age(self, *, now: datetime | None = None) -> float | None:
+        """Age of the newest bar on the timeframe that actually gates entries.
+
+        This is the single source of truth for recovery.  ``_staleness`` answers
+        the same question at a decision instant; this answers it at an arbitrary
+        moment, which is what recovery needs.  ``None`` means no decision-timeframe
+        bar has been consumed yet — start-up, not staleness.
+        """
+        frame = self.frames[DECISION_TIMEFRAME]
+        if frame.empty:
+            return None
+        moment = self.clock.now() if now is None else now
+        closed = candle_close_time(frame.index[-1], DECISION_TIMEFRAME).to_pydatetime()
+        return max(0.0, (moment - closed).total_seconds())
+
+    def _recover_data_health(self) -> None:
+        """Grant recovery only when the decision timeframe is genuinely fresh.
+
+        This is the correction behind ``VB-LIV-008``.  Recovery used to be
+        granted by *arrival*: any event that processed without error marked the
+        data HEALTHY, zeroed the fault count and closed a data-fault breaker.
+        But an arriving bar is evidence only about its own timeframe.  A 5m bar
+        proves the socket is alive; it says nothing about whether the 15m stream
+        that gates every entry came back.  Because the feed delivers the 5m bar
+        before the 15m decision at a boundary, the breaker was reliably cleared
+        by an event that was not a recovery, one step before the decision it was
+        meant to guard — and the durable health record published HEALTHY through
+        an outage of the decision stream.
+
+        Binding recovery to the timeframe that gates entries removes the
+        ambiguity without adding a policy: the threshold is the existing
+        ``stale_after_seconds``, already calibrated to this timeframe.
+        """
+        if (self.health.data.status == HealthStatus.HEALTHY
+                and not self.health.circuit_open
+                and self.health.consecutive_data_faults == 0):
+            return                      # nothing to recover; common path unchanged
+        age = self._decision_data_age()
+        if age is not None and age > self.stale_after_seconds:
+            return                      # still stale: arrival is not recovery
+        self._set_health(self.health.data, HealthStatus.HEALTHY, "")
+        self.health.consecutive_data_faults = 0
+        if self.health.circuit_open and self.health.circuit_reason in _AUTO_RESET_FAULTS:
+            self.health.circuit_open = False
+            reason = self.health.circuit_reason
+            self.health.circuit_reason = ""
+            self.audit("data", AuditSeverity.WARNING, "CIRCUIT_BREAKER_CLOSED",
+                       {"previous_reason": reason,
+                        "recovered_on": DECISION_TIMEFRAME,
+                        "decision_data_age_seconds": age})
 
     def _append_bar(self, event: MarketEvent) -> None:
         frame = self.frames[event.timeframe]

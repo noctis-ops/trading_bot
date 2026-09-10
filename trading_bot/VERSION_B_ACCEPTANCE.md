@@ -4,7 +4,7 @@ This document defines the machine-checkable gate required before any Historical 
 
 ## Current remediation gate record
 
-As of 2026-09-11, the automated gate reports **PASS** with 181 mandatory
+As of 2026-09-11, the automated gate reports **PASS** with 185 mandatory
 assertions passed, 0 failed, 0 errors, 0 skipped across 17 modules.
 `baseline_collected` remains `false`.
 
@@ -25,7 +25,7 @@ clone: `restored: true`.
 | Restart recovery contract | `PASS` | Computed from `RestartRecoveryTests`: offline fill, crash between fill and event, unresolved reporting, vanished resting stop, idempotent re-recovery, hydrated accounting |
 | Baseline readiness contract | `PASS` | Computed from `LineageTests`, `MetricDefinitionTests`, `ArtifactContractTests`, `ReplayLineageTests`, `ReproducibilityTests`: artifact contract, reproducible lineage, pinned drawdown, legacy separation, aggregation guard |
 | Operational acceptance contract | `PASS` | Computed from the eight `test_version_b_operational_acceptance` classes: bar-by-bar operation, crash/restart/continue, duplicate events, venue degradation, bad data, single instance, operational controls, and event-driven vs replay parity |
-| Paper driver contract | `PASS` | Computed from the seven `test_version_b_paper_driver` classes: end-to-end start→clock→event→decision→risk→intent→fill→lifecycle→DB→restart→resume **through the driver**, the `MarketDataAdapter` boundary, clock separation, window/boundary negative controls, live heartbeat and lease, **process liveness independent of market-data flow**, and preserved parity plus guarantees |
+| Paper driver contract | `PASS` | Computed from the eight `test_version_b_paper_driver` classes: end-to-end start→clock→event→decision→risk→intent→fill→lifecycle→DB→restart→resume **through the driver**, the `MarketDataAdapter` boundary, clock separation, window/boundary negative controls, live heartbeat and lease, **process liveness independent of market-data flow**, stale-recovery semantics, and preserved parity plus guarantees |
 | Integration acceptance contract | `PASS` | Computed from `OnePathNotParallelImplementationTests`, `StrategyRiskExecutionEndToEndTests`, `RestartDuringOpenLifecycleTests`, `LegacyFallbackClosureTests`: one unified path, decision→DB end to end, restart from rows alone, legacy fallback closure |
 | Runtime/exchange protection acknowledgement | `UNKNOWN` | Requires a real venue: create → fetch/ack confirmation and `clientOrderId` deduplication |
 | Restart reconciliation against an exchange | `UNKNOWN` | Durable DB reconstruction and deterministic reconciliation are covered; a live-account restart drill is not |
@@ -73,13 +73,24 @@ Making `_wait_for_source` return immediately, so a quiet source reads as an
 exhausted one, fails 5. All three sabotages were reverted and verified
 byte-identical.
 
-**Known limit — a silence-opened breaker is cleared by the bar that ends the
-silence.** `on_event` closes an `_AUTO_RESET_FAULTS` breaker after any event that
-processes cleanly, so the outage breaker cannot block the decision that
-immediately follows the outage. Entry blocking on stale data is guaranteed
-instead by `_process_decision`'s own staleness check and by the breaker whenever
-it is open at decision time; both are proven. Recorded as `VB-LIV-005` rather
-than silently changed.
+**Stale-recovery negative control (`VB-LIV-008`).** `on_event` used to grant
+recovery on *arrival*: any event that processed cleanly marked the data HEALTHY
+and closed a data-fault breaker. At a 15m boundary the feed delivers the 1h bar,
+then the 5m bar, then the decision — so a breaker opened by an outage was
+cleared by two events that carry no evidence about the timeframe gating entries,
+one step before the decision it existed to guard. Measured on the same sequence:
+before the fix the decision returned `EXECUTED` and opened a position; after, it
+returns `CIRCUIT_OPEN_REJECTED` and opens nothing. Reverting the fix fails all 5
+recovery tests, including `EXECUTED != CIRCUIT_OPEN_REJECTED`.
+
+**Source of truth, stated explicitly.** Two measures with distinct, documented
+roles, and one writer of stored state. `assess_data_freshness()` measures the
+newest bar on **any** timeframe and answers *"has the feed stopped?"* — it opens
+the breaker. `_decision_data_age()` measures the **decision timeframe** and
+answers *"is it safe to enter again?"* — it is the only thing that grants
+recovery. `_process_decision`'s own `_staleness` check is unconditional and
+gates every entry regardless of stored state. No event clears anything by merely
+arriving.
 
 **Tree cleanliness.** Running the full suite and the gate now changes **no
 tracked file**. Previously every run appended to the tracked `logs/bot.log`,

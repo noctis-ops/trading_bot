@@ -69,8 +69,10 @@ performed.
   live process look dead. `MarketDataAdapter.idle_until()` is the optional hook
   a socket-backed feed would use to declare that it is waiting; the default
   `None` preserves the deterministic adapter exactly.
-- **Known limit (`VB-LIV-005`).** `on_event` closes a data-fault breaker on any
-  cleanly processed event, so a breaker opened by an outage is cleared by the
-  first bar that ends it. Stale-data entry blocking is therefore proven via
-  `_process_decision`'s staleness check and via the breaker when it is open at
-  decision time — not via the outage path alone.
+- **Stale-data source of truth (`VB-LIV-008`).** `assess_data_freshness()`
+  (newest bar on any timeframe) opens the breaker and answers "has the feed
+  stopped"; `_decision_data_age()` (decision timeframe) is the only thing that
+  grants recovery and answers "is it safe to enter again"; `_staleness` gates
+  every decision unconditionally. Recovery is never granted by an event merely
+  arriving — proven by walking the 1h → 5m → 15m boundary sequence after a real
+  silence.

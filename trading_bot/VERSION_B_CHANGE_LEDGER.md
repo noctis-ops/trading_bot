@@ -1029,8 +1029,10 @@ after the initial component implementation.
   that does not survive; `test_a_breaker_opened_by_assessment_refuses_the_next_entry`
   proves the breaker refuses an entry when it is open at decision time
   (`CIRCUIT_OPEN_REJECTED`, no position, `ENTRY_BLOCKED_CIRCUIT_OPEN` audited).
-- **Status:** documented as a known limit; a recovery-debounce policy would be a
-  separate decision
+- **Status:** **superseded by `VB-LIV-008`.** Recording it as an accepted limit
+  was the wrong call: on review this is a correctness defect, not a policy
+  choice, and it has been fixed. The entry above is kept as found so the change
+  of verdict is visible.
 
 ### VB-LIV-006 — Liveness, lease and staleness transitions are auditable
 - **Phase:** Liveness Independence
@@ -1062,6 +1064,82 @@ after the initial component implementation.
   --lease-seconds 900` produced 142 beats and exit 0; `--resume` then skipped
   200 and delivered 310 (= 510). `TRADING_MODE=paper` and
   `--version-b-paper` without `--frames-dir` both still exit `2`.
+- **Status:** implemented and verified
+
+### VB-LIV-008 — Verdict on `VB-LIV-005`: CORRECTNESS DEFECT; recovery rebound to freshness
+- **Phase:** Stale-Recovery Semantics
+- **Category / severity:** Correctness / **High** — fixes a defect
+- **Component:** `core/version_b_runtime.py`
+- **Verdict:** **CORRECTNESS DEFECT**, not `CORRECT AS DESIGNED`.
+- **Source of truth before the fix — there was not one.** Three places decided
+  stale-data state and they disagreed:
+  1. `_process_decision` → `_staleness(decision_time)` measures the **decision
+     timeframe**, is recomputed from `self.frames` on every call, and raises
+     `StaleDataRejected` unconditionally. This is the only gate that could never
+     be talked past, and it is why no decision was ever *taken* on stale data.
+  2. `assess_data_freshness()` measures the newest bar on **any** timeframe.
+  3. `on_event`'s recovery block measured **nothing** — it granted `HEALTHY`,
+     zeroed `consecutive_data_faults` and closed an `_AUTO_RESET_FAULTS` breaker
+     because an event had *arrived*.
+  (3) wrote over (1) and (2) with no evidence, and (3) is what
+  `operational_state()` publishes durably and what the audit trail records.
+- **Why it is a defect, from the code.** The module's own comment stated the
+  policy as "closes on the next healthy **decision**"; the code closed it on the
+  next healthy **event**. At a 15m boundary the feed delivers the 1h bar, then
+  the closing 5m bar, then the 15m decision — so the breaker was cleared by two
+  events that carry no evidence about the timeframe gating entries, one step
+  before the decision it existed to guard. Measured on the identical sequence
+  (5-minute silence before the boundary, `stale_after_seconds=60`,
+  `data_fault_threshold=1`):
+
+  | step | before | after |
+  |---|---|---|
+  | after silence, 1h bar | `circuit_open=False` | `circuit_open=True` |
+  | 5m bar | `circuit_open=False` | `circuit_open=True`, `data=STALE` |
+  | 15m decision | **`EXECUTED`** | **`CIRCUIT_OPEN_REJECTED`** |
+  | positions opened | **1** | **0** |
+
+  So an entry *was* taken on the first decision after a data outage. Separately,
+  a 3-hour stall of the 15m stream with 5m bars still flowing published
+  `data: HEALTHY, circuit_open: false` durably while `_staleness` read 12600 s
+  against a 3600 s threshold and every decision was rejected.
+- **The fix.** `_recover_data_health()` replaces the inline block. Recovery is
+  granted only when `_decision_data_age()` — the newest bar on the timeframe
+  that gates entries, measured against the injected clock — is within
+  `stale_after_seconds`. `None` (no decision-timeframe bar yet) is start-up, not
+  staleness, and still recovers, so warm-up is unaffected. The threshold is the
+  existing `stale_after_seconds`, already calibrated to this timeframe, so **no
+  new parameter and no new policy** were introduced. When nothing needs
+  recovering the method returns immediately, leaving the healthy path identical.
+  `CIRCUIT_BREAKER_CLOSED` now records `recovered_on` and
+  `decision_data_age_seconds`, so the trail says what granted recovery.
+- **Source of truth after the fix, stated explicitly.** `assess_data_freshness()`
+  (any timeframe) answers *"has the feed stopped?"* and opens the breaker.
+  `_decision_data_age()` (decision timeframe) answers *"is it safe to enter
+  again?"* and is the **only** thing that grants recovery. `_staleness` still
+  gates every decision unconditionally. No event clears anything by arriving.
+- **Not a debouncing policy.** Recovery is not delayed by a counter or a timer;
+  it is granted by the first event that is actual evidence — in this fixture the
+  15m decision bar itself, one event later. Proven not to stick:
+  `test_the_decision_bar_is_the_recovery_event_and_the_next_one_proceeds` shows
+  the breaker closing, health returning to `HEALTHY`, the next signal executing
+  and the trade closing at `net_pnl 32.5`.
+- **Strategy rules/parameters changed:** No. Risk, execution and lifecycle
+  semantics untouched.
+- **Evidence:** `test_neither_the_1h_nor_the_5m_bar_clears_a_stale_breaker`,
+  `test_the_first_decision_after_an_outage_is_refused_not_executed`,
+  `test_the_decision_bar_is_the_recovery_event_and_the_next_one_proceeds`,
+  `test_recovery_never_depends_on_how_many_events_arrive`, and the corrected
+  `test_stale_market_data_opens_the_breaker_without_any_event`. Negative
+  control: reverting the fix fails all 5, including
+  `EXECUTED != CIRCUIT_OPEN_REJECTED`.
+- **Known limit that remains, stated plainly.** A stall of the *decision*
+  timeframe while other timeframes keep flowing is not detected by
+  `assess_data_freshness`, because that measure asks "is anything arriving".
+  Such a stall produces no decision events, so no entry can be taken, and the
+  first decision attempted on it is refused by `_staleness`. Detecting the stall
+  itself would require a per-timeframe expected cadence — a new parameter and a
+  new policy — which is out of scope here.
 - **Status:** implemented and verified
 
 ## Retained intentional paths

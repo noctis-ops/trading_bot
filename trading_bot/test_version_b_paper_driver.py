@@ -40,6 +40,7 @@ from core.version_b_paper_driver import (
     TIMEFRAMES,
 )
 from core.version_b_runtime import (
+    DECISION_TIMEFRAME,
     AuditSeverity,
     EventOutcome,
     HealthStatus,
@@ -745,11 +746,13 @@ class LivenessIndependenceTests(DriverTestCase):
         stale = [json.loads(a.detail_json) for a in driver.store.audit_trail("DRV")
                  if a.code == "STALE_DATA"]
         self.assertTrue(any(d.get("source") == "liveness_assessment" for d in stale))
-        # The bar that ends the silence makes the data genuinely fresh again, so
-        # the data-fault breaker closes on it.  What matters is the order: the
-        # outage was detected and recorded while nothing was arriving.
-        self.assertLess(codes.index("CIRCUIT_BREAKER_OPEN"),
-                        codes.index("CIRCUIT_BREAKER_CLOSED"))
+        # The bar that ends the silence is a 1h bar.  It is evidence that the
+        # socket is alive; it is not evidence that the 15m stream gating every
+        # entry came back.  So it must NOT clear the breaker (VB-LIV-008).
+        self.assertTrue(driver.runtime.health.circuit_open,
+                        "a 1h bar is not recovery for the decision timeframe")
+        self.assertEqual(driver.runtime.health.data.status, HealthStatus.STALE)
+        self.assertNotIn("CIRCUIT_BREAKER_CLOSED", codes)
         # The outage opened no position and closed no trade: protection is an
         # entry control, and nothing about the open lifecycle was touched.
         state = driver.runtime.operational_state()
@@ -1013,6 +1016,134 @@ class LivenessIndependenceTests(DriverTestCase):
         self.assertEqual(store.lock_holder("DRV").holder, "proc-B")
         self.assertIn("LOCK_TAKEN_OVER", [a.code for a in store.audit_trail("DRV")])
         successor.shutdown()
+
+# ─────────────────────────────────────────────────────────────────────
+# Recovery semantics: which event is allowed to clear a stale breaker
+# ─────────────────────────────────────────────────────────────────────
+class StaleRecoverySemanticsTests(DriverTestCase):
+    """`VB-LIV-008` — the ordering the defect lived in.
+
+    At a 15m boundary the feed delivers the 1h bar, then the closing 5m bar,
+    then the 15m decision.  Recovery used to be granted by *arrival*, so the
+    first two cleared a breaker opened by an outage one step before the decision
+    it existed to guard — and the entry went through.
+
+    Withhold index 368 puts a real 5-minute silence immediately before that
+    boundary, so the sequence can be walked one event at a time.
+    """
+
+    def make_outage_driver(self, **kwargs):
+        kwargs.setdefault("heartbeat_interval", 60.0)
+        kwargs.setdefault("stale_after_seconds", 60.0)
+        kwargs.setdefault("data_fault_threshold", 1)
+        return PaperDriver(
+            db_path=self.db_path,
+            adapter=QuietSource(self.frames, withhold_after=368),
+            run_id="RCV", initial_balance=1000, strategy=FixtureStrategy(),
+            fee_rate=0.0, slippage_rate=0.0, **kwargs)
+
+    def walk_to_the_boundary(self, driver):
+        driver.start()
+        driver.run(max_events=368)
+        self.assertFalse(driver.runtime.health.circuit_open)
+        driver.step()                       # silence, then the 1h bar
+        return driver
+
+    def test_neither_the_1h_nor_the_5m_bar_clears_a_stale_breaker(self):
+        driver = self.walk_to_the_boundary(self.make_outage_driver())
+        self.addCleanup(driver.close)
+        self.assertTrue(driver.runtime.health.circuit_open,
+                        "the 1h bar must not clear it")
+
+        outcome = driver.step()             # the closing 5m bar
+        self.assertEqual(outcome, EventOutcome.IGNORED)
+        self.assertTrue(driver.runtime.health.circuit_open,
+                        "the 5m bar must not clear it either")
+        self.assertEqual(driver.runtime.health.data.status, HealthStatus.STALE)
+        self.assertNotIn("CIRCUIT_BREAKER_CLOSED",
+                         [a.code for a in driver.store.audit_trail("RCV")])
+        driver.shutdown()
+
+    def test_the_first_decision_after_an_outage_is_refused_not_executed(self):
+        """This is the behaviour that changed, stated as an outcome.
+
+        Before `VB-LIV-008` the same sequence returned `EXECUTED` and opened a
+        position: the 1h and 5m bars had already cleared the breaker.
+        """
+        driver = self.walk_to_the_boundary(self.make_outage_driver())
+        self.addCleanup(driver.close)
+        driver.step()                       # the 5m bar
+        self.assertTrue(driver.runtime.health.circuit_open)
+
+        outcome = driver.step()             # the 15m decision
+        self.assertEqual(outcome, EventOutcome.CIRCUIT_OPEN_REJECTED)
+        self.assertEqual(driver.runtime.operational_state()["open_position_count"], 0,
+                         "no entry on the first decision after an outage")
+        self.assertIn((AuditSeverity.WARNING.value, "ENTRY_BLOCKED_CIRCUIT_OPEN"),
+                      [(a.severity, a.code) for a in driver.store.audit_trail("RCV")])
+        driver.shutdown()
+
+    def test_the_decision_bar_is_the_recovery_event_and_the_next_one_proceeds(self):
+        """stale -> recovery event -> fresh state -> next decision.
+
+        The 15m decision bar is the first event that carries actual evidence
+        about the timeframe gating entries, so it is the one allowed to close
+        the breaker — and the decision after it is a normal decision again.
+        Recovery is never left stuck open.
+        """
+        driver = self.walk_to_the_boundary(self.make_outage_driver())
+        self.addCleanup(driver.close)
+        driver.step()                       # 5m bar: no recovery
+        self.assertEqual(driver.step(), EventOutcome.CIRCUIT_OPEN_REJECTED)
+
+        trail = driver.store.audit_trail("RCV")
+        codes = [a.code for a in trail]
+        self.assertIn("CIRCUIT_BREAKER_CLOSED", codes,
+                      "recovery must happen, just not on the wrong event")
+        self.assertLess(codes.index("CIRCUIT_BREAKER_OPEN"),
+                        codes.index("CIRCUIT_BREAKER_CLOSED"))
+        closed = [json.loads(a.detail_json) for a in trail
+                  if a.code == "CIRCUIT_BREAKER_CLOSED"]
+        self.assertEqual(closed[-1]["recovered_on"], DECISION_TIMEFRAME)
+        self.assertEqual(closed[-1]["previous_reason"], "STALE_DATA")
+        self.assertFalse(driver.runtime.health.circuit_open)
+        self.assertEqual(driver.runtime.health.data.status, HealthStatus.HEALTHY)
+        self.assertEqual(driver.runtime.health.consecutive_data_faults, 0)
+
+        # And the run recovers completely: the next signal trades and closes.
+        # Outcomes accumulate for the driver's lifetime, so compare the delta —
+        # the one refusal already recorded above must not be counted again.
+        blocked_before = driver.report.outcome(EventOutcome.CIRCUIT_OPEN_REJECTED.value)
+        self.assertEqual(blocked_before, 1)
+        driver.run()
+        self.assertEqual(driver.report.outcome(EventOutcome.CIRCUIT_OPEN_REJECTED.value),
+                         blocked_before, "no decision is refused once recovery lands")
+        self.assertEqual(driver.report.outcome(EventOutcome.EXECUTED.value), 1)
+        state = driver.runtime.operational_state()
+        self.assertEqual(state["closed_trade_count"], 1)
+        self.assertAlmostEqual(state["balance"], 1032.5)
+        driver.shutdown()
+
+    def test_recovery_never_depends_on_how_many_events_arrive(self):
+        """Ten 5m bars in a row are still not recovery.
+
+        The old rule was "any event that processed cleanly", so volume of
+        traffic looked like health.  Only the decision timeframe coming back
+        counts, however much else arrives.
+        """
+        driver = self.walk_to_the_boundary(self.make_outage_driver())
+        self.addCleanup(driver.close)
+        for _ in range(1):
+            driver.step()                   # the 5m bar at the boundary
+        self.assertTrue(driver.runtime.health.circuit_open)
+        # Every remaining event up to the next 15m boundary is a 5m bar.
+        for _ in range(2):
+            driver.step()
+        self.assertFalse(driver.runtime.health.circuit_open,
+                         "the 15m bar at the next boundary is the recovery")
+        self.assertEqual(driver.runtime.health.data.status, HealthStatus.HEALTHY)
+        driver.shutdown()
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Parity and preserved guarantees

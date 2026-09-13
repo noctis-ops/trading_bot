@@ -1142,6 +1142,46 @@ after the initial component implementation.
   new policy — which is out of scope here.
 - **Status:** implemented and verified
 
+### VB-DOC-001 — Closure Review: malformed classification row repaired
+- **Phase:** Final Version B Closure Review
+- **Category / severity:** Documentation / Low — no behavior change
+- **Component:** `VERSION_B_TEST_CLASSIFICATION.md`
+- **Defect:** the `test_version_b_paper_driver.py` row carried 7 pipe-delimited
+  fields where the header and every other row carry 6: when the liveness
+  work landed, a new "what it proves" cell was inserted without merging it
+  into the existing one, so the table columns no longer lined up and the
+  "what it does not prove" column displayed the wrong cell.
+- **Fix:** merged the two "what it proves" cells into one (driver-layer proof
+  first, liveness-separation proof second, both preserved verbatim); the row
+  now has 6 fields like every other row. No wording was dropped.
+- **Verification:** field count per `| \`test_` row is 6 for all 17 rows.
+- **Status:** implemented and verified
+
+### VB-DOC-002 — Closure Review: stale `LB-008` corrected against the code
+- **Phase:** Final Version B Closure Review
+- **Category / severity:** Documentation / Medium — a stale blocker misstates
+  the current Paper path and could misdirect the Live Readiness gate
+- **Component:** `VERSION_B_LIVE_BLOCKERS.md`
+- **Defect:** `LB-008` still said "Paper compatibility mode still uses ticker
+  polling; deterministic 5M replay is not yet the sole operational path."
+  Verified false at `56e061e`: the default Paper path is
+  `MarketDataAdapter → Clock → PaperDriver → VersionBPaperRuntime`
+  (`main.py --version-b-paper`; `run_version_b_paper`), the implicit legacy
+  loop raises `LegacyPaperPathDisabled` (`core/bot.py`, asserted by
+  `test_implicit_paper_no_longer_runs_outside_version_b` and
+  `test_the_legacy_path_only_opens_with_an_explicit_recorded_override`), and
+  ticker polling survives only inside the retained legacy
+  `PaperTradingExchange` behind the explicit Python-only
+  `allow_legacy_paper=True` override (no env/CLI route exists — verified by
+  grep: the parameter is never read from `os.getenv` and `main.py` never
+  passes it).
+- **Fix:** rewrote `LB-008` to record the resolution, keep the audit trail of
+  what it used to say, and fold the residual evidence (a long real-cadence
+  Paper run) into `LB-001` Paper operational validation where it belongs.
+- **Not changed:** no code, no test, no parameter. The row's ID is retained so
+  existing references stay valid.
+- **Status:** implemented and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

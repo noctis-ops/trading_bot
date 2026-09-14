@@ -11,7 +11,9 @@ Checks per dataset:
   - open_time strictly increasing, no duplicates (ordering/dedup);
   - every open_time aligned to the timeframe step; close_time == open+step-1;
   - first/last open exactly equal the pinned bounds (spec §4);
-  - gap scan: every missing step is listed (no unexplained silent gaps);
+  - gap scan: every missing step is listed AND any missing candle fails
+    verification (`no_missing_candles`); an incomplete dataset can never
+    verify as passed;
   - row_count == expected_gapless - missing;
   - numeric sanity: prices > 0, high>=low, volume >= 0.
 
@@ -117,6 +119,13 @@ def verify_dataset(directory: Path, entry: dict) -> dict:
             result["gaps"].append(ms_iso(expected_cursor))
         expected_cursor += step
     result["missing_candles"] = len(result["gaps"])
+    # A gap is a defect, not an annotation: an unexplained missing candle must
+    # FAIL verification (non-zero exit) so the workflow never commits an
+    # incomplete snapshot labelled as passed. Found as a real blocker in the
+    # pre-run review: `passed` ignored `missing_candles` entirely, and
+    # row_count_consistent_with_gaps is true by construction whenever the only
+    # problem is missing rows.
+    result["checks"]["no_missing_candles"] = (result["missing_candles"] == 0)
     result["checks"]["row_count_consistent_with_gaps"] = (
         len(opens) == spec["expected_rows_gapless"] - len(result["gaps"])
     )

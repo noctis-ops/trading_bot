@@ -1246,6 +1246,34 @@ after the initial component implementation.
 - **Status:** tooling implemented and verified; collection pending an
   environment with Binance egress
 
+### VB-BASE-003 — Snapshot verifier: a gap now fails verification instead of being annotated
+- **Phase:** Baseline preparation (data acquisition)
+- **Category / severity:** Correctness of tooling / **High** — fixes a defect
+  found in the pre-run safety review
+- **Component:** `tools/verify_baseline_snapshot.py` (acquisition tooling,
+  outside the frozen Version B implementation)
+- **Defect:** `passed = all(checks.values())` did not include the gap scan.
+  Missing candles were recorded in `gaps`/`missing_candles` as information
+  only, and `row_count_consistent_with_gaps` is true by construction whenever
+  the only problem is missing rows. Proven executable: a dataset with one
+  missing mid-year candle verified as `passed=True` / exit 0, so the CI
+  workflow would have committed an incomplete snapshot labelled `ALL PASSED`.
+  This is the "check proves implementation, not behavior" pattern
+  (cf. VB-INT-010) applied to tooling.
+- **Fix:** one new check — `checks["no_missing_candles"] = (missing_candles == 0)`
+  — so any unexplained gap fails the dataset, `all_passed` becomes false, and
+  the CLI exits non-zero, which stops the workflow before its commit step.
+  Docstring updated to state the enforcement. No other logic changed.
+- **Verification (all executed):** intact spec-shaped 1h dataset → PASS;
+  one missing candle → FAIL (`no_missing_candles`); duplicate candle → FAIL
+  (`no_duplicates` + ordering); wrong start bound → FAIL
+  (`first_open_matches_spec`); wrong end bound → FAIL
+  (`last_open_matches_spec`). End-to-end CLI contract: `main()` on a good
+  snapshot dir → exit 0 `ALL PASSED`; on a gapped snapshot dir → exit 1
+  `FAILURES PRESENT`.
+- **Strategy rules/parameters changed:** No. Frozen code changed: No.
+- **Status:** implemented and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

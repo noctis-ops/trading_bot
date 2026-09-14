@@ -1,0 +1,55 @@
+# TEMPLATE — GitHub Actions workflow for snapshot acquisition.
+#
+# The Arena sandbox cannot reach any Binance/exchange/data host (egress
+# allowlist covers only github/pypi/npm), and the GitHub App token used here
+# lacks the `workflows` permission, so this file cannot be pushed to
+# .github/workflows/ from this session. To use it, copy it yourself to:
+#
+#     .github/workflows/baseline-snapshot.yml
+#
+# on the session branch (via the GitHub web UI or a local clone), and it will
+# fetch, verify, and commit the immutable snapshot automatically.
+#
+# It performs acquisition ONLY: public historical klines, no API key, no
+# account, no orders, no baseline run, baseline_collected untouched.
+
+name: Baseline data snapshot (historical OHLCV only)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: baseline-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arena/01a09c4a-trading-bot
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch pinned snapshot (stdlib only, startTime pagination)
+        working-directory: trading_bot
+        run: python tools/fetch_baseline_snapshot.py
+
+      - name: Verify snapshot against the pinned specification
+        working-directory: trading_bot
+        run: python tools/verify_baseline_snapshot.py
+
+      - name: Commit immutable snapshot to the session branch
+        run: |
+          git config user.name "baseline-snapshot-bot"
+          git config user.email "actions@github.com"
+          git add trading_bot/data_snapshots/baseline_2025
+          git commit -m "Add immutable Baseline 2025 data snapshot + manifest (acquisition only) [skip ci]"
+          git push origin arena/01a09c4a-trading-bot

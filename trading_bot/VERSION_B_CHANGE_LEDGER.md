@@ -1202,6 +1202,50 @@ after the initial component implementation.
   `baseline_collected` remains `false`.
 - **Status:** pinned
 
+### VB-BASE-002 — Snapshot acquisition tooling built; collection blocked by sandbox egress
+- **Phase:** Baseline preparation (data acquisition)
+- **Category / severity:** Measurement tooling / Medium
+- **Component:** `tools/baseline_snapshot_spec.py`, `tools/fetch_baseline_snapshot.py`,
+  `tools/verify_baseline_snapshot.py`, `tools/baseline-snapshot.workflow.yml.template`
+  (all new, all OUTSIDE the frozen Version B implementation), `.gitignore`
+- **What was built:**
+  - `baseline_snapshot_spec.py` — pinned constants copied verbatim from
+    `BASELINE_DATA_SPECIFICATION.md` (VB-BASE-001); expected gapless row
+    counts (8,960 / 35,240 / 105,141) re-derived and asserted in-session.
+  - `fetch_baseline_snapshot.py` — public Binance historical klines only
+    (`data-api.binance.vision` preferred, `api.binance.com` fallback), no API
+    key/account/order surface; `startTime` pagination (the REST spelling of
+    CCXT `since`), limit 1000; raw 12-field rows persisted verbatim as
+    deterministic gzip CSV (mtime=0 ⇒ content-only SHA-256); writes
+    `manifest.json` with per-dataset raw-file SHA-256, bounds, row counts,
+    retrieval timestamp, source; **refuses to run if a manifest already
+    exists** (snapshot immutability is enforced, not assumed).
+  - `verify_baseline_snapshot.py` — read-only checks: sha256 vs manifest,
+    header, strict ordering, duplicates, step alignment,
+    `close_time == open+step−1`, exact spec bounds, full gap scan,
+    `row_count == expected − missing`, numeric sanity; writes
+    `verification_report.json`.
+  - Identity separation is stated in both the manifest (`identity_note`) and
+    the verifier: raw-file SHA-256 is **provenance**; the binding measurement
+    identity remains the frozen engine's `hash_frames` (lineage.data.data_hash).
+- **Verification of the tooling itself (no market data involved):**
+  synthetic spec-shaped 1h dataset → all checks PASS at exactly 8,960 rows;
+  deterministic re-write produces an identical SHA-256; negative controls:
+  one removed candle → exactly one gap flagged with row-count consistency
+  held; one duplicated candle → `no_duplicates=False`.
+- **Blocked:** actual collection. This sandbox's egress allowlist covers
+  GitHub/PyPI/npm only; every Binance host (api/api1/api-gcp/www,
+  data.binance.vision, data-api.binance.vision), every alternative exchange
+  (Kraken/Bybit/OKX/KuCoin), S3/GCS, and public proxies all fail TLS
+  (curl code 000). A CI workflow that would fetch+verify+commit the snapshot
+  was written but the session token lacks the `workflows` permission to push
+  it; it is preserved as `tools/baseline-snapshot.workflow.yml.template`.
+- **Strategy rules/parameters changed:** No. Frozen code changed: No.
+- **Not done:** no snapshot data exists yet, no baseline run, no artifact,
+  `baseline_collected` remains `false`.
+- **Status:** tooling implemented and verified; collection pending an
+  environment with Binance egress
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

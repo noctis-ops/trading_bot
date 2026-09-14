@@ -1182,6 +1182,26 @@ after the initial component implementation.
   existing references stay valid.
 - **Status:** implemented and verified
 
+### VB-BASE-001 — Baseline Data Specification pinned (window + Option-B warm-up)
+- **Phase:** Baseline preparation (post-freeze, pre-collection)
+- **Category / severity:** Measurement / Medium — pins measurement identity
+  inputs before any data exists
+- **Component:** `BASELINE_DATA_SPECIFICATION.md` (new document; no code)
+- **Decision recorded:** source Binance-via-CCXT (historical only, paginated
+  with `since`); measurement window `2025-01-01 00:00 UTC → 2025-12-31 23:55
+  UTC`; frozen five-symbol universe; frames `1h/15m/5m`; **warm-up Option B** —
+  exact-count rows prepended before the window (`1h` from `2024-12-23 16:00`,
+  200 rows; `15m` from `2024-12-29 22:00`, 200 rows; `5m` from `2024-12-31
+  22:15`, 21 rows) so the first in-window decision is fully VALID and no trade
+  can open pre-window (`INSUFFICIENT_WARMUP → DATA_REJECTED` under the frozen
+  gate — verified numerically against `closed_rows`/`assess_frame` semantics).
+  Raw-file SHA-256 is snapshot-manifest provenance; the binding identity stays
+  the engine-computed `hash_frames` and covers warm-up rows by design.
+- **Strategy rules/parameters changed:** No. Frozen code changed: No.
+- **Not done:** no download, no Baseline run, no artifact,
+  `baseline_collected` remains `false`.
+- **Status:** pinned
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

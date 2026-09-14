@@ -16,7 +16,9 @@
 name: Baseline data snapshot (historical OHLCV only)
 
 on:
-  workflow_dispatch: {}
+  push:
+    branches: [arena/01a09c4a-trading-bot]
+    paths: [".github/workflows/baseline-snapshot.yml"] 
 
 permissions:
   contents: write

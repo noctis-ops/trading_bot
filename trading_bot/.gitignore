@@ -75,3 +75,8 @@ test_*.py
 config_local.yaml
 credentials.json
 API_keys.txt
+
+# Baseline immutable snapshot: the manifest and raw datasets ARE committed
+# deliberately (reproducibility evidence). Do not ignore them.
+!data_snapshots/
+!data_snapshots/**

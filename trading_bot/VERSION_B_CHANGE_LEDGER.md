@@ -1274,6 +1274,33 @@ after the initial component implementation.
 - **Strategy rules/parameters changed:** No. Frozen code changed: No.
 - **Status:** implemented and verified
 
+### VB-BASE-004 — Snapshot collection attempt: workflow activation blocked by token permissions
+- **Phase:** Baseline preparation (data acquisition)
+- **Category / severity:** Operational record / Medium — no data was collected
+- **Component:** none (no repository content changed by the attempts)
+- **What was attempted (all in-session, all failed):**
+  1. `git push` of `.github/workflows/baseline-snapshot.yml` (from the
+     verified template) → remote rejected: GitHub App token lacks the
+     `workflows` permission.
+  2. Contents API (`PUT /repos/.../contents/.github/workflows/...`) → 403
+     "Resource not accessible by integration".
+  3. Git-data API (blob → tree → commit → `PATCH refs`) → blob creation
+     succeeded, ref update to a commit containing a workflow file → 403.
+  4. Direct egress recheck to `data-api.binance.vision`, `api.binance.com`,
+     `data.binance.vision` → still fully blocked (TLS reset, curl code 000),
+     so in-sandbox collection remains impossible (VB-BASE-002).
+- **Conclusion:** the sandbox can neither fetch the data itself nor install
+  the CI workflow that would. Activation requires an actor with `workflow`
+  scope: copy `tools/baseline-snapshot.workflow.yml.template` to
+  `.github/workflows/baseline-snapshot.yml` on `arena/01a09c4a-trading-bot`
+  via the GitHub web UI (or a local clone with a personal token), then run it
+  from the Actions tab (`workflow_dispatch`).
+- **No fallback data was used; no verification step was bypassed.** No
+  snapshot exists, no baseline was run, `baseline_collected` remains `false`,
+  and `arena/01a06886-trading-bot` remains at `56e061e` (verified by
+  `ls-remote` after the attempts).
+- **Status:** blocked pending workflow installation by the user
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

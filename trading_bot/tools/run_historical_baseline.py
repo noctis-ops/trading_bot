@@ -47,7 +47,9 @@ from core.baseline_artifact import (  # noqa: E402
     build_baseline_artifact,
     write_baseline_artifact,
 )
+from core.risk_engine import RiskEngine  # noqa: E402
 from database.version_b_store import VersionBStore  # noqa: E402
+from indicators.provider import IndicatorProvider  # noqa: E402
 from tools.baseline_snapshot_spec import (  # noqa: E402
     SNAPSHOT_DIRNAME,
     SYMBOLS,
@@ -58,8 +60,16 @@ from tools.baseline_snapshot_spec import (  # noqa: E402
 SNAPSHOT_DIR = REPO / SNAPSHOT_DIRNAME
 
 
-def load_frame(symbol: str, timeframe: str) -> pd.DataFrame:
-    """Snapshot gz-CSV -> OHLCV frame indexed by UTC open time. Verbatim rows."""
+def load_frame(symbol: str, timeframe: str, config) -> pd.DataFrame:
+    """Snapshot gz-CSV -> OHLCV + canonical indicator columns, UTC-indexed.
+
+    Indicator enrichment uses the frozen canonical ``IndicatorProvider``
+    (VB-IND-001) with the frozen config — exactly what the live/paper data
+    path (``MarketData.add_indicators``) provides to the Strategy. The frozen
+    Strategy reads indicator COLUMNS (``ema_slow``, ``adx``, ...); feeding it
+    bare OHLCV silently fails every gate, so enrichment is an input-shape
+    requirement, not a parameter choice.
+    """
     path = SNAPSHOT_DIR / dataset_filename(symbol, timeframe)
     with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
         raw = pd.read_csv(handle)
@@ -74,7 +84,7 @@ def load_frame(symbol: str, timeframe: str) -> pd.DataFrame:
     expected = TIMEFRAMES[timeframe]["expected_rows_gapless"]
     if len(frame) != expected:
         raise SystemExit(f"snapshot integrity: {path.name} has {len(frame)} rows, expected {expected}")
-    return frame
+    return IndicatorProvider.add_indicators(frame, config)
 
 
 def require_clean_committed_tree() -> str:
@@ -89,9 +99,10 @@ def require_clean_committed_tree() -> str:
 
 
 def run_one(symbol: str, direction: str, out_dir: Path, db_dir: Path) -> dict:
-    df_1h = load_frame(symbol, "1h")
-    df_15m = load_frame(symbol, "15m")
-    df_5m = load_frame(symbol, "5m")
+    config = RiskEngine().config  # frozen runtime config (source of truth)
+    df_1h = load_frame(symbol, "1h", config)
+    df_15m = load_frame(symbol, "15m", config)
+    df_5m = load_frame(symbol, "5m", config)
 
     run_id = f"baseline2025-{symbol.replace('/', '')}-{direction}-{uuid.uuid4().hex[:8]}"
     store = VersionBStore(db_dir / f"{run_id}.sqlite")

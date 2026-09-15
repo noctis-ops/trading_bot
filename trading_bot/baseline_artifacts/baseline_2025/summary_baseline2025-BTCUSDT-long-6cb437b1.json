@@ -1,0 +1,11 @@
+{
+  "symbol": "BTC/USDT",
+  "direction": "long",
+  "run_id": "baseline2025-BTCUSDT-long-6cb437b1",
+  "artifact_file": "baseline_strategymodel_BTCUSDT_long_vb-1.0-5m-stop-first_d402ca38005a.json",
+  "data_hash": "d402ca38005a98195ad48ca69cdb999ae7bc267d11077a58c725c829806eefd9",
+  "fingerprint": "060638316b23f482247685e14bc71333e8911e8353a89ebaeff4ec646bc7f9af",
+  "model_trade_count": 3,
+  "model_forced_exit_count": 0,
+  "code_commit": "9c063366c483bea155b535b4517911580172f0da"
+}

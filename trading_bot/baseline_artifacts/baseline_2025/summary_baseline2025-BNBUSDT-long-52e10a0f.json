@@ -1,0 +1,11 @@
+{
+  "symbol": "BNB/USDT",
+  "direction": "long",
+  "run_id": "baseline2025-BNBUSDT-long-52e10a0f",
+  "artifact_file": "baseline_strategymodel_BNBUSDT_long_vb-1.0-5m-stop-first_b5ec21357bd1.json",
+  "data_hash": "b5ec21357bd1115ef577a1d823e36be22ad39e5cd0eca2879621facd919fc215",
+  "fingerprint": "a9e79891d134f8dfdc4b37e01fb69269ef0d36b169e721f8117c2dbcb0e8f925",
+  "model_trade_count": 12,
+  "model_forced_exit_count": 0,
+  "code_commit": "9c063366c483bea155b535b4517911580172f0da"
+}

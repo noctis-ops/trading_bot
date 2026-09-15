@@ -1,0 +1,11 @@
+{
+  "symbol": "BTC/USDT",
+  "direction": "short",
+  "run_id": "baseline2025-BTCUSDT-short-2e6a7f64",
+  "artifact_file": "baseline_strategymodel_BTCUSDT_short_vb-1.0-5m-stop-first_d402ca38005a.json",
+  "data_hash": "d402ca38005a98195ad48ca69cdb999ae7bc267d11077a58c725c829806eefd9",
+  "fingerprint": "a17172f9cab0097fa02e45e7896549d7c9e8fe9585b0e76fd565822d9511b1d1",
+  "model_trade_count": 29,
+  "model_forced_exit_count": 0,
+  "code_commit": "9c063366c483bea155b535b4517911580172f0da"
+}

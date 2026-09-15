@@ -1301,6 +1301,52 @@ after the initial component implementation.
   `ls-remote` after the attempts).
 - **Status:** blocked pending workflow installation by the user
 
+### VB-BASE-005 — Historical Baseline collected (Type-1 Strategy Model Baseline)
+- **Phase:** Historical Baseline
+- **Category / severity:** Measurement / **High** — first Type-1 measurement
+- **Component:** `baseline_artifacts/baseline_2025/` (10 artifacts + 10 run
+  summaries), `tools/run_historical_baseline.py` (runner tool, outside frozen
+  code), `VERSION_A_MANIFEST.json` (`baseline_collected` flipped in the same
+  change that stores the artifacts, per definition §6.6)
+- **Pipeline (frozen, no overrides):** snapshot frames + canonical
+  `IndicatorProvider` enrichment → `VersionBBacktestEngine`
+  (= `VersionBReplayEngine`, environment `backtest`) → `StrategyCore` →
+  `RiskEngine` → `VersionBExecutionService` (`vb-1.0-5m-stop-first`) →
+  `VersionBStore` → `measurement_lineage`/`measurement_metrics` →
+  `build_baseline_artifact(require_clean_tree=True)`.
+- **Inputs:** immutable snapshot at commit `4f7260d`
+  (`data_snapshots/baseline_2025`, VB-BASE-001/002, verified 15/15, 0 gaps).
+  Warm-up Option B; the frozen warm-up gate produced exactly 199 pre-window
+  `DATA_REJECTED` decisions per run (15m boundary before 2025-01-01), i.e.
+  no trade before the measurement window, mechanically.
+- **Runs:** 10/10 completed (5 symbols × long/short), each with its own
+  `VersionBStore` DB and unique `run_id`. All 10 artifacts pass the frozen
+  `validate_baseline_artifact` in strict mode; filenames match the mandatory
+  pattern; every lineage carries commit `9c06336` (clean tree), config
+  sha256, per-symbol `data_hash`, execution model id, strategy `1.3`.
+- **Runner defect found and fixed during execution (tool-only):** the first
+  BTC/USDT long run produced 0 signals across 35,040 checks because the
+  runner fed bare OHLCV while the frozen Strategy reads indicator COLUMNS
+  (`ema_slow`, `adx`, …) that the live data path supplies via
+  `add_indicators`. Diagnosed from the run's own decision records
+  (`1h_price_above_ema200=false` while manual EMA200 said true). Fix: enrich
+  frames with the canonical `IndicatorProvider` (VB-IND-001) using the frozen
+  config — an input-shape correction in the acquisition/runner layer, not a
+  parameter choice; indicators are causal (no lookahead). Commit `9c06336`.
+  The defective run's artifact was discarded and the run repeated.
+- **Reproducibility (§9):** BTC/USDT long executed twice end-to-end from the
+  snapshot: identical `data_hash`
+  (`d402ca38005a…`) and identical `artifact_fingerprint`
+  (`0606383…`). Deterministic.
+- **Type-1 interpretation intact:** no profitability verdict anywhere;
+  metrics restricted to the pinned `model_*`/`equity_curve_*` keys; funding
+  0.0 and modeled costs recorded in `metric_definitions`; drawdown is the
+  15m-sampled lower bound per §7. These numbers are a reference point for
+  Ablation/Sensitivity/OOS — **not** expected performance, and no parameter
+  may be selected from them (LB-012).
+- **Strategy rules/parameters changed:** No. Frozen code changed: No.
+- **Status:** collected and verified
+
 ## Retained intentional paths
 
 - Legacy `TradingBot()` and `TradingStrategy`/`RiskManager` production paths

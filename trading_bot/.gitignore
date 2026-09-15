@@ -80,3 +80,5 @@ API_keys.txt
 # deliberately (reproducibility evidence). Do not ignore them.
 !data_snapshots/
 !data_snapshots/**
+!baseline_artifacts/
+!baseline_artifacts/**

@@ -1,0 +1,94 @@
+{
+  "artifact_schema": "vb-baseline-1",
+  "counts": {
+    "accepted_signals": 83,
+    "data_rejections": 199,
+    "decision_records": 35239,
+    "frame_rows": {
+      "15m": 35240,
+      "1h": 8960,
+      "5m": 105141
+    },
+    "rejected_signals": 34580,
+    "signal_checks": 35040
+  },
+  "execution_model_version": "vb-1.0-5m-stop-first",
+  "generated_at": "2026-09-14T22:08:54.020082+00:00",
+  "interpretation_banner": "STRATEGY_MODEL_BASELINE measures the frozen decision and execution model replayed over historical OHLCV. It is not an operational or live result, not a forecast, and carries no profitability verdict. Funding is modeled as 0.0, costs are configured model constants, and order rejection, partial fills, timeouts, unknown order state, disconnects, latency, and exchange-side rounding do not exist in this measurement.",
+  "lineage": {
+    "code": {
+      "branch": "arena/01a09c4a-trading-bot",
+      "commit": "9c063366c483bea155b535b4517911580172f0da",
+      "dirty": false,
+      "identity_version": "vb-code-identity-1"
+    },
+    "config": {
+      "config_sha256": "446ed396a1832dbefa9c1d10744f72f37c4720b718717af4bb4e30dadbd70668"
+    },
+    "data": {
+      "data_hash": "cf17d5e99ce741f643c94b1fba7227d2e990aed57517fc437499fbddf85ae525",
+      "data_hash_algorithm": "sha256-frames-v1",
+      "frame_row_counts": {
+        "15m": 35240,
+        "1h": 8960,
+        "5m": 105141
+      }
+    },
+    "execution_model": {
+      "execution_model_version": "vb-1.0-5m-stop-first"
+    },
+    "lineage_schema": "vb-lineage-1",
+    "run_scope": {
+      "direction": "short",
+      "initial_balance": 10000.0,
+      "symbol": "SOL/USDT",
+      "timeframes": {
+        "decision": "15m",
+        "exit": "5m"
+      },
+      "universe": [
+        "SOL/USDT"
+      ]
+    },
+    "strategy": {
+      "strategy_version": "1.3"
+    }
+  },
+  "measurement_scope": "TYPE_1_STRATEGY_MODEL",
+  "metric_definitions": {
+    "costs": "configured model constants; not observed fills",
+    "equity_curve": "Account equity from VersionBExecutionService.equity(marks=...) using the decision-bar close as the mark, seeded with initial_balance. Equity is wallet value + margin used + unrealized PnL - accrued costs. A curve built without marks is not an equity curve and must not be used for drawdown. SAMPLING RESOLUTION: one point per 15m decision bar, while exits resolve on 5m bars, so movement inside a decision interval is not observed.",
+    "funding": "modeled as exactly 0.0; not observed funding",
+    "max_drawdown": "Largest peak-to-trough decline of the marked equity curve, expressed as a percentage of the running peak: max((peak - equity) / peak * 100). It is computed on the equity curve against the actual initial_balance. It is never computed from closed-trade PnL and never against an arbitrary base. Because the curve is sampled per 15m decision bar, this value is a LOWER BOUND on the true peak-to-trough drawdown; a deeper intra-interval trough is not visible to it and must not be claimed as measured."
+  },
+  "metrics": {
+    "equity_curve_end": 11952.139004,
+    "equity_curve_max_drawdown_pct": 9.626296,
+    "equity_curve_peak_equity": 12525.417232,
+    "equity_curve_peak_index": 32326,
+    "equity_curve_points": 35240,
+    "equity_curve_start": 10000.0,
+    "equity_curve_trough_equity": 9311.09346,
+    "equity_curve_trough_index": 6555,
+    "model_cost_total": 533.973272,
+    "model_exit_reason_distribution": {
+      "STOP_LOSS": 58,
+      "TAKE_PROFIT_2": 25
+    },
+    "model_forced_exit_count": 0,
+    "model_gross_loss": 4673.158831,
+    "model_gross_win": 6625.297835,
+    "model_losing_count": 40,
+    "model_net_pnl": 1952.139004,
+    "model_profit_factor": 1.417734,
+    "model_trade_count": 83,
+    "model_win_rate_pct": 51.807229,
+    "model_winning_count": 43
+  },
+  "non_deterministic_fields": [
+    "generated_at"
+  ],
+  "not_an_operational_result": true,
+  "profitability_verdict": null,
+  "report_type": "STRATEGY_MODEL_BASELINE"
+}

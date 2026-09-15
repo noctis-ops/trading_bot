@@ -1,0 +1,11 @@
+{
+  "symbol": "DOGE/USDT",
+  "direction": "short",
+  "run_id": "baseline2025-DOGEUSDT-short-f52ef8ab",
+  "artifact_file": "baseline_strategymodel_DOGEUSDT_short_vb-1.0-5m-stop-first_4bcfce3ed610.json",
+  "data_hash": "4bcfce3ed610c273df928c7965ada2699e8b6422cc97124cf246096f79ad1677",
+  "fingerprint": "5b4aa9acb583d53f8c9e0ff44d654acc34208f3d5f8ea840ee5097a6a62d4506",
+  "model_trade_count": 109,
+  "model_forced_exit_count": 0,
+  "code_commit": "9c063366c483bea155b535b4517911580172f0da"
+}

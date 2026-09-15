@@ -75,6 +75,14 @@
   "measurement_status": {
     "functional_tests_run_for_this_manifest": false,
     "statistical_validation": false,
-    "baseline_collected": false
+    "baseline_collected": true,
+    "baseline_record": {
+      "report_type": "STRATEGY_MODEL_BASELINE",
+      "measurement_scope": "TYPE_1_STRATEGY_MODEL",
+      "collected_at_code_commit": "9c063366c483bea155b535b4517911580172f0da",
+      "artifacts_dir": "baseline_artifacts/baseline_2025",
+      "snapshot_commit": "4f7260d8fea9f7971b16040263a4cca4847e2534",
+      "change_ledger_entry": "VB-BASE-005"
+    }
   }
 }

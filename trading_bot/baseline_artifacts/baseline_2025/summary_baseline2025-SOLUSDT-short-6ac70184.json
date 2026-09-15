@@ -1,0 +1,11 @@
+{
+  "symbol": "SOL/USDT",
+  "direction": "short",
+  "run_id": "baseline2025-SOLUSDT-short-6ac70184",
+  "artifact_file": "baseline_strategymodel_SOLUSDT_short_vb-1.0-5m-stop-first_cf17d5e99ce7.json",
+  "data_hash": "cf17d5e99ce741f643c94b1fba7227d2e990aed57517fc437499fbddf85ae525",
+  "fingerprint": "599635ea2b47f180d785f2efa4c7d28ae4ce2480d5100bf44e7a3c9c5e30d69a",
+  "model_trade_count": 83,
+  "model_forced_exit_count": 0,
+  "code_commit": "9c063366c483bea155b535b4517911580172f0da"
+}

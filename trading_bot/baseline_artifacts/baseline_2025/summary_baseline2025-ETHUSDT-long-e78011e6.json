@@ -1,0 +1,11 @@
+{
+  "symbol": "ETH/USDT",
+  "direction": "long",
+  "run_id": "baseline2025-ETHUSDT-long-e78011e6",
+  "artifact_file": "baseline_strategymodel_ETHUSDT_long_vb-1.0-5m-stop-first_5bbc7a6215da.json",
+  "data_hash": "5bbc7a6215dab0b20dcc0a1fb0d81582f4c3f39e0998b52e3beed7599dac2baf",
+  "fingerprint": "8b072d691550943b3674a4c6fee07328a9c1c0b867b786e3ff17073145a03db9",
+  "model_trade_count": 14,
+  "model_forced_exit_count": 0,
+  "code_commit": "9c063366c483bea155b535b4517911580172f0da"
+}

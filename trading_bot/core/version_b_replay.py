@@ -91,6 +91,9 @@ class VersionBReplayEngine:
         self.decisions: list[dict[str, Any]] = []
         self.signal_checks = 0
         self.rejected_signals = 0
+        self.position_open_rejections = 0
+        self.risk_rejections = 0
+        self.execution_rejections = 0
         self.data_rejections = 0
         self.equity_curve: list[float] = [self.initial_balance]
         self.timestamps: list[pd.Timestamp] = []
@@ -246,7 +249,11 @@ class VersionBReplayEngine:
             entry_price=entry_price,
             atr=atr,
         )
+        if symbol in self.service.positions:
+            self.position_open_rejections += 1
+            return None
         if not plan["stops"].get("valid", False):
+            self.risk_rejections += 1
             return None
         size = plan["position_size"]
         signal_id = self._signal_id(self.run_id, symbol, direction, timestamp)
@@ -263,7 +270,17 @@ class VersionBReplayEngine:
                 signal_id=signal_id if self.run_id else None,
                 event_time=timestamp.to_pydatetime(),
             )
+        except InsufficientBalanceError:
+            self.execution_rejections += 1
+            return None
+        except InvalidExecutionLevelsError:
+            self.risk_rejections += 1
+            return None
+        except ExecutionServiceError:
+            self.execution_rejections += 1
+            return None
         except ValueError:
+            self.execution_rejections += 1
             return None
         accepted = {
             "signal_id": signal_id,
@@ -488,6 +505,9 @@ class VersionBReplayEngine:
             "data_rejections": self.data_rejections,
             "accepted_signals": len(self.signals),
             "rejected_signals": self.rejected_signals,
+            "position_open_rejections": self.position_open_rejections,
+            "risk_rejections": self.risk_rejections,
+            "execution_rejections": self.execution_rejections,
             "total_trades": len(trades),
             "winning_trades": len(wins),
             "losing_trades": len(losses),

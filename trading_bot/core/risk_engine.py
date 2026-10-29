@@ -32,6 +32,7 @@ class PositionSize:
     leverage: float
     score_factor: float
     planned_risk: PlannedRisk
+    effective_leverage: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,7 +129,10 @@ class RiskEngine:
         distance_pct = distance / entry_price
         notional = risk_amount / distance_pct
         max_leverage = float(score_cfg.get("max_leverage", 10))
-        leverage = max(1.0, min(notional / equity, max_leverage))
+        # VB-FIX-001: Venue execution leverage is fixed at max_leverage (10.0x),
+        # not dynamic notional / equity which caused artificial margin rejections.
+        leverage = max_leverage
+        effective_leverage = notional / equity if equity > 0 else 0.0
         quantity = notional / entry_price
         planned = self.calculate_planned_risk(
             side=side,
@@ -147,6 +151,7 @@ class RiskEngine:
             leverage=leverage,
             score_factor=factor,
             planned_risk=planned,
+            effective_leverage=effective_leverage,
         )
 
     def calculate_planned_risk(self, **kwargs) -> PlannedRisk:

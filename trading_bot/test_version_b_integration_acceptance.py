@@ -309,7 +309,7 @@ class StrategyRiskExecutionEndToEndTests(UnifiedPathTestCase):
         self.assertEqual(reconstructed["recomputed_exit_reason"], "TAKE_PROFIT_2")
         self.assertAlmostEqual(reconstructed["recomputed_net_pnl"], report["total_profit"])
         self.assertEqual(len(reconstructed["fills"]), 3)
-        self.assertEqual(reconstructed["leverage"], 1.0)
+        self.assertEqual(reconstructed["leverage"], 10.0)
 
 
 # ─────────────────────────────────────────────────────────────────────

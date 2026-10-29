@@ -30,6 +30,20 @@ EXIT_EVENT_TYPES = frozenset({
     "EMERGENCY_EXIT", "END_OF_DATA", "MANUAL_EXIT",
 })
 
+class ExecutionServiceError(Exception):
+    """Base exception for deterministic execution service errors."""
+    pass
+
+
+class InsufficientBalanceError(ExecutionServiceError):
+    """Raised when available balance is insufficient to cover initial margin and fees."""
+    pass
+
+
+class InvalidExecutionLevelsError(ExecutionServiceError):
+    """Raised when entry/SL/TP order levels violate geometric sanity."""
+    pass
+
 
 
 @dataclass
@@ -364,21 +378,21 @@ class VersionBExecutionService:
         event_time: datetime | None = None,
     ) -> ExecutionPosition:
         if symbol in self.positions:
-            raise ValueError(f"position already open for {symbol}")
+            raise ExecutionServiceError(f"position already open for {symbol}")
         if side not in ("long", "short"):
-            raise ValueError(f"unsupported side: {side}")
+            raise ExecutionServiceError(f"unsupported side: {side}")
         if entry_price <= 0 or quantity <= 0 or leverage <= 0:
-            raise ValueError("entry price, quantity, and leverage must be positive")
+            raise ExecutionServiceError("entry price, quantity, and leverage must be positive")
         if side == "long" and not (stop_loss < entry_price < take_profit_1 < take_profit_2):
-            raise ValueError("invalid long levels")
+            raise InvalidExecutionLevelsError("invalid long levels")
         if side == "short" and not (stop_loss > entry_price > take_profit_1 > take_profit_2):
-            raise ValueError("invalid short levels")
+            raise InvalidExecutionLevelsError("invalid short levels")
 
         notional = entry_price * quantity
         entry_fee = notional * self.fee_rate
         margin = notional / leverage
         if margin + entry_fee > self.balance:
-            raise ValueError("insufficient available balance")
+            raise InsufficientBalanceError("insufficient available balance")
         self.balance -= margin + entry_fee
 
         lifecycle = TradeLifecycle(trade_id or self._new_trade_id(symbol), symbol, side)
